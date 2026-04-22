@@ -110,77 +110,165 @@ function extractTitle(content, fallback) {
   return m ? m[1].trim() : fallback;
 }
 
-function rebuildMemoryIndex() {
+// Tokens we never want as topic signal: English stopwords + boilerplate
+// terms that show up in every report ("research", "claim", "evidence", …).
+const STOP = new Set((
+  "a an and are as at be been being but by can cant could did do does doing " +
+  "done dont down during each few for from further had has have having he her " +
+  "here hers herself him himself his how i if in into is it its itself just me " +
+  "more most my myself no nor not now of off on once only or other our ours " +
+  "ourselves out over own same she should so some such than that the their " +
+  "theirs them themselves then there these they this those through to too " +
+  "under until up very was way we were what when where which while who whom " +
+  "why will with would you your yours yourself yourselves " +
+  // research-report boilerplate (would dominate IDF otherwise)
+  "research report section claim evidence source sources cite cited citation " +
+  "citations confidence verified likely speculative contested tldr summary " +
+  "executive overview analysis findings conclusion conclusions key questions " +
+  "method methodology approach data table tables figure figures appendix " +
+  "introduction background context note notes ref refs reference references " +
+  "url urls link links page pages chart charts graph graphs"
+).split(/\s+/));
+
+function tokenizeForTopics(text) {
+  return text.toLowerCase().split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && t.length <= 30 && !STOP.has(t) && !/^\d+$/.test(t));
+}
+
+// Build the TF-IDF corpus over all reports once. Returns:
+//   { docs: Map<path, {title, mtime, size, tf: Map<tok,count>, len, content}>,
+//     df: Map<tok, docFreq>, N: docCount }
+function buildCorpus() {
   const reports = listPastReports();
+  const docs = new Map();
+  const df = new Map();
+  for (const r of reports) {
+    try {
+      const content = readFileSync(r.path, "utf8");
+      const title = extractTitle(content, r.name);
+      const toks = tokenizeForTopics(content);
+      const tf = new Map();
+      for (const t of toks) tf.set(t, (tf.get(t) || 0) + 1);
+      for (const t of tf.keys()) df.set(t, (df.get(t) || 0) + 1);
+      docs.set(r.path, { path: r.path, title, mtime: r.mtime, size: r.size, tf, len: toks.length, content });
+    } catch { /* skip */ }
+  }
+  return { docs, df, N: docs.size };
+}
+
+// TF-IDF score for a token in a doc. Ignores tokens that appear in
+// >70% of docs (low IDF = no topic signal).
+function tfidf(token, tfCount, docLen, df, N) {
+  if (!docLen || !N) return 0;
+  const docFreq = df.get(token) || 0;
+  if (docFreq === 0) return 0;
+  if (N >= 5 && docFreq / N > 0.7) return 0; // too common → noise
+  const tf = tfCount / docLen;
+  const idf = Math.log((N + 1) / (docFreq + 0.5)) + 1; // smoothed
+  return tf * idf;
+}
+
+// Top distinctive terms in a single doc (for tagging the memory index).
+function topTags(docEntry, df, N, n = 8) {
+  const tags = [];
+  for (const [tok, cnt] of docEntry.tf.entries()) {
+    const s = tfidf(tok, cnt, docEntry.len, df, N);
+    if (s > 0) tags.push({ tok, s });
+  }
+  return tags.sort((a, b) => b.s - a.s).slice(0, n).map((x) => x.tok);
+}
+
+function rebuildMemoryIndex() {
+  const corpus = buildCorpus();
+  const reports = [...corpus.docs.values()].sort((a, b) => b.mtime - a.mtime);
   const lines = [
     "# Research Memory Index",
     `*Auto-generated. ${reports.length} report(s) on file. Last refreshed: ${new Date().toISOString().slice(0, 19)}Z.*`,
     "",
     "This index is consulted by the planner before every new research run.",
     "If a topic overlaps with prior work, the planner builds on it instead of",
-    "duplicating effort. Use the `recall_prior_research` tool to query.",
+    "duplicating effort. Use the `recall_prior_research` tool to query —",
+    "scoring is TF-IDF with a relevance threshold, so unrelated topics return",
+    "no matches rather than spurious ones.",
     "",
     "---",
     "",
   ];
   for (const r of reports) {
-    try {
-      const content = readFileSync(r.path, "utf8");
-      const title = extractTitle(content, r.name);
-      const tldr = extractTldr(content);
-      lines.push(`## ${title}`);
-      lines.push(`**File**: \`${r.path}\``);
-      lines.push(`**Updated**: ${r.mtime.toISOString().slice(0, 10)} | **Size**: ${(r.size / 1024).toFixed(1)}KB`);
-      lines.push("");
-      lines.push(tldr);
-      lines.push("");
-      lines.push("---");
-      lines.push("");
-    } catch { /* skip unreadable */ }
+    const tags = topTags(r, corpus.df, corpus.N);
+    let tldr = "";
+    try { tldr = extractTldr(r.content); } catch { /* ignore */ }
+    lines.push(`## ${r.title}`);
+    lines.push(`**File**: \`${r.path}\``);
+    lines.push(`**Updated**: ${r.mtime.toISOString().slice(0, 10)} | **Size**: ${(r.size / 1024).toFixed(1)}KB`);
+    lines.push(`**Tags**: ${tags.length ? tags.join(", ") : "_(none extracted)_"}`);
+    lines.push("");
+    lines.push(tldr);
+    lines.push("");
+    lines.push("---");
+    lines.push("");
   }
   try { writeFileSync(MEMORY_INDEX_PATH, lines.join("\n")); } catch { /* ignore */ }
   return reports.length;
 }
 
+// Slim session-start digest: NO per-report titles (they pollute context for
+// unrelated topics). Just total count + the most distinctive cross-corpus
+// tags so the orchestrator knows roughly which clusters exist on file.
 function memoryDigestForContext() {
-  const reports = listPastReports();
-  if (reports.length === 0) return null;
-  const top = reports.slice(0, 8).map((r) => {
-    try {
-      const content = readFileSync(r.path, "utf8");
-      const title = extractTitle(content, r.name);
-      return `- ${title} — \`${r.path}\` (${r.mtime.toISOString().slice(0, 10)})`;
-    } catch { return `- ${r.name}`; }
-  });
-  return `**Memory** (${reports.length} prior report(s)):\n${top.join("\n")}\n\nUse the \`recall_prior_research\` tool to retrieve specifics. The full index is at \`${MEMORY_INDEX_PATH}\`.`;
+  const corpus = buildCorpus();
+  if (corpus.N === 0) return null;
+  // Aggregate tag frequency across reports → cluster overview.
+  const tagFreq = new Map();
+  for (const doc of corpus.docs.values()) {
+    for (const t of topTags(doc, corpus.df, corpus.N, 10)) {
+      tagFreq.set(t, (tagFreq.get(t) || 0) + 1);
+    }
+  }
+  const clusters = [...tagFreq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([t, n]) => `${t}(${n})`)
+    .join(", ");
+  return `**Memory**: ${corpus.N} prior report(s) on file. Topic clusters present: ${clusters || "_(none extracted)_"}.\n` +
+    `Use \`recall_prior_research\` to query — TF-IDF scored, returns *no_matches* if your topic is unrelated to anything prior.\n` +
+    `Index file: \`${MEMORY_INDEX_PATH}\`.`;
 }
 
-function searchMemory(query, max = 5) {
-  const reports = listPastReports();
-  const tokens = query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
-  if (!tokens.length) return [];
+// TF-IDF + length-normalized search with a minimum relevance threshold so
+// unrelated topics return zero matches instead of weak spurious ones.
+// Title tokens are weighted 5x.
+function searchMemory(query, max = 5, opts = {}) {
+  const minScore = opts.minScore != null ? opts.minScore : 0.015;
+  const queryToks = tokenizeForTopics(query);
+  if (!queryToks.length) return [];
+  const corpus = buildCorpus();
+  if (corpus.N === 0) return [];
   const scored = [];
-  for (const r of reports) {
-    try {
-      const content = readFileSync(r.path, "utf8").toLowerCase();
-      let score = 0;
-      const hits = [];
-      for (const t of tokens) {
-        const count = (content.match(new RegExp(`\\b${t}\\b`, "g")) || []).length;
-        if (count > 0) { score += count; hits.push(t); }
-      }
-      if (score > 0) {
-        const raw = readFileSync(r.path, "utf8");
-        scored.push({
-          path: r.path,
-          title: extractTitle(raw, r.name),
-          score,
-          hits,
-          tldr: extractTldr(raw, 400),
-          mtime: r.mtime,
-        });
-      }
-    } catch { /* skip */ }
+  for (const doc of corpus.docs.values()) {
+    const titleToks = new Set(tokenizeForTopics(doc.title));
+    let score = 0;
+    const hits = [];
+    for (const qt of queryToks) {
+      const tfCount = doc.tf.get(qt) || 0;
+      if (tfCount === 0) continue;
+      let s = tfidf(qt, tfCount, doc.len, corpus.df, corpus.N);
+      if (titleToks.has(qt)) s *= 5; // title match is a strong topic signal
+      if (s > 0) { score += s; hits.push(qt); }
+    }
+    if (score >= minScore && hits.length > 0) {
+      let tldr = "";
+      try { tldr = extractTldr(doc.content, 400); } catch {}
+      scored.push({
+        path: doc.path,
+        title: doc.title,
+        score: Number(score.toFixed(4)),
+        hits,
+        tags: topTags(doc, corpus.df, corpus.N, 6),
+        tldr,
+        mtime: doc.mtime,
+      });
+    }
   }
   return scored.sort((a, b) => b.score - a.score).slice(0, max);
 }
@@ -370,6 +458,7 @@ const session = await joinSession({
             path: r.path,
             updated: r.mtime.toISOString().slice(0, 10),
             relevance_hits: r.hits,
+            tags: r.tags,
             score: r.score,
             tldr: r.tldr,
           })),

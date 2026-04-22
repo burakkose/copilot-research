@@ -34,6 +34,9 @@ The index entry per report:
 - Title (from `# H1`)
 - Path
 - Updated date + size
+- **Tags**: top 5–8 most distinctive terms from the report, auto-extracted
+  by TF-IDF over the whole corpus. Tags are the cheapest way to know
+  whether a prior report is in the same topic cluster as your new query.
 - TL;DR or Executive Summary excerpt (≤600 chars)
 
 The full report files are *not* loaded into context — only the index digest.
@@ -42,17 +45,40 @@ in full when needed.
 
 ---
 
+## How retrieval works (and why unrelated topics return nothing)
+
+Memory uses **TF-IDF with length normalization, title-token boosting (5×),
+and a minimum relevance threshold** — not semantic embeddings, but stronger
+than raw keyword count:
+
+- A token that appears in >70% of reports (corpus ≥5) gets zero weight —
+  it's noise.
+- The score is normalized by report length, so a long report doesn't
+  automatically win.
+- A query whose tokens never overlap distinctively with any prior report
+  returns `status: "no_matches"` rather than weak spurious hits. This is
+  intentional — running unrelated investigations should NOT pollute the new
+  one with prior context.
+
+So when you do a coffee-brewing run after an AI-agents run, `recall_prior_research`
+on coffee terms will simply return `no_matches` and you proceed fresh. No
+cross-contamination.
+
+---
+
 ## How to phrase recall queries
 
-Memory uses keyword overlap (not semantic embedding), so:
-- **Use specific terms** the prior report would have used
+- **Use specific terms** the prior report would have used (look at its tags
+  in `_memory-index.md`)
 - **Try multiple keywords** if the first query returns nothing
 - **Don't paraphrase** — match the original framing
+- For follow-up runs that are deliberately related, query using the prior
+  report's distinctive tags
 
 Example:
 ```
-recall_prior_research("LLM agent benchmarks GAIA")        # good
-recall_prior_research("how good are AI agents these days") # weaker
+recall_prior_research("LLM agent benchmarks GAIA")        # good — specific
+recall_prior_research("how good are AI agents these days") # weaker — vague
 ```
 
 ---
