@@ -1,52 +1,77 @@
-# 🔬 AI Research Agent — Multi-Agent Edition
+# 🔬 AI Research Agent — Enterprise Multi-Agent Edition (v2)
 
-A best-practice multi-agent research and brainstorming system built on
-GitHub Copilot CLI. **Hybrid orchestrator-workers** architecture: a planner
-decomposes the topic, spawns parallel specialist subagents, then runs an
-adversarial red-team critique, synthesis, and citation-verification pass —
-with optional code-driven validation of quantitative claims.
+A production-grade autonomous research and brainstorming system built on
+GitHub Copilot CLI. Hybrid orchestrator-workers architecture with
+**cross-session memory**, **adaptive supervision**, **multi-model critique**,
+and **confidence-based escalation** — informed by April 2026 research-agent
+literature (MIA, HiRAS, CoSearch, SeekerGym).
 
-## Pipeline
+## Pipeline (v2)
 
 ```
-plan_research  →  parallel specialists (general-purpose subagents)
-                  ├── web_trends
-                  ├── academic_papers
-                  ├── market_analysis
-                  ├── competitor_analysis
-                  ├── tech_landscape
-                  ├── developer_sentiment
-                  └── funding_activity
-                          ↓
-                  validate_with_code   ←── (optional, on numeric claims)
-                          ↓
-                  synthesize draft  →  red_team_critique (rubber-duck)
-                          ↓                       ↓
-                  revise based on critique ←──────┘
-                          ↓
-                  citation_verifier  →  finalize report
-                          ↓
-                  brainstorm_from_research (optional)
+recall_prior_research          MIA-inspired memory
+        ↓
+plan_research                  decompose into specialist scopes
+        ↓
+parallel specialists           CoSearch-inspired multi-query reformulation
+  ├── web_trends                ↳ inline-quote evidence (no paraphrase-and-cite)
+  ├── academic_papers
+  ├── market_analysis
+  ├── competitor_analysis
+  ├── tech_landscape
+  ├── developer_sentiment
+  └── funding_activity
+        ↓
+completeness_audit             SeekerGym-inspired gap detection
+        ↓                       ↳ adaptive fill-in spawn (HiRAS-inspired)
+validate_with_code             PAL-style quantitative validation
+        ↓
+citation-grounded synthesis    every claim has an inline quote
+        ↓
+red_team_critique              different model family (variance reduction)
+        ↓
+revise + escalation            🟠/⚡ on key claims → spawn dig-deeper specialists
+        ↓
+citation_verifier              fetch every URL, check claim support
+        ↓
+memory update                  index report for future recall
 ```
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `plan_research` | Decompose topic → specialist scopes + adversarial searches → save plan |
-| `run_deep_research` | Full pipeline. `autonomy: auto \| interactive`. `enable_code_validation` default `true`. |
-| `deep_paper_search` | arXiv + Semantic Scholar + citation-graph traversal (find critics of landmark papers) |
-| `trend_quantifier` | GitHub stars/bus-factor, npm/PyPI downloads, Google Trends, job-posting counts — fits curves, reports R² |
-| `concept_explainer` | Layered breakdown of a technical concept with runnable code (intro / practitioner / expert) |
-| `red_team_critique` | Spawns a rubber-duck agent to adversarially review any draft markdown |
-| `citation_verifier` | Fetches every cited URL, checks claim support, flags broken / unsupported / vendor-misclassified |
-| `validate_with_code` | Python validation of a quantitative claim — recompute, trend fit, Monte Carlo, survey CI, benchmark |
-| `brainstorm_from_research` | Stress-tested project ideas with pre-mortems, optional code-validated market-fit numbers |
-| `list_research_reports` | Index of everything in `research-output/` |
+| Tool | Phase | What it does |
+|---|---|---|
+| `recall_prior_research` | 0 | Query cross-session memory of past reports |
+| `plan_research` | 1 | Decompose topic → specialist scopes + adversarial searches |
+| `run_deep_research` | All | Full enterprise pipeline (configurable autonomy) |
+| `deep_paper_search` | Specialist | arXiv + Semantic Scholar with citation-graph traversal |
+| `trend_quantifier` | Specialist | GitHub/npm/PyPI/Trends/jobs — code-validated curves |
+| `concept_explainer` | Standalone | Layered breakdown with runnable code |
+| `completeness_audit` | 2.5 | Gap detection on specialist notes; recommends fill-ins |
+| `red_team_critique` | 4 | Adversarial review on a *different model family* |
+| `validate_with_code` | 3.5 | Python validation: Monte Carlo, trend fit, CI, recompute |
+| `citation_verifier` | 6 | Fetch every URL, check claim support |
+| `brainstorm_from_research` | Output | Stress-tested project ideas with optional code-validated market fit |
+| `list_research_reports` | Browse | Index of everything in `research-output/` |
+
+## What's new in v2 (vs the original Anthropic-style orchestrator-workers)
+
+| Upgrade | Source paper | Why it matters |
+|---|---|---|
+| **Cross-session memory** + auto-index | MIA (arXiv 2604.04503) | Avoid re-deriving what prior reports already established; build on findings |
+| **Completeness audit + adaptive fill-in** | SeekerGym (arXiv 2604.17143), HiRAS (arXiv 2604.17745) | SOTA agents silently miss >50% of relevant info; explicit gap detection + dynamic specialist spawning closes this |
+| **Multi-query reformulation** | CoSearch (arXiv 2604.17555) | Treating retrieval as fixed leaves up to 26.8% F1 on the table; 3 query rephrasings per critical claim recovers most of it |
+| **Multi-model red-team** | Standard ensemble practice | A critic on the same model family shares the writer's blind spots; running it on a different family (gpt-5.4 vs Claude) reduces variance |
+| **Confidence-based escalation** | Calibration literature | Low-confidence (🟠/⚡) findings on decision-relevant claims auto-trigger focused dig-deeper specialists |
+| **Citation-grounded synthesis** | RAG hallucination research | Inline-quoted evidence per claim, not paraphrase + bare cite — the latter is where hallucinations hide |
+
+We did not adopt full **agentic-RL training** (LiteResearcher, Tongyi
+DeepResearch) — it requires training infrastructure outside the prompt-orchestration
+model. The other 5 upgrades together close most of the gap.
 
 ## Quick Start
 
-### 1. Install MCP servers (all optional — there are built-in fallbacks)
+### 1. Install MCP servers (all optional — built-in fallbacks exist)
 
 ```bash
 cp .env.example .env
@@ -54,9 +79,9 @@ $EDITOR .env       # add whichever API keys you have
 source .env
 ```
 
-Then in Copilot CLI, run `/mcp` and copy the server entries from
-`mcp-servers.json`. Recommended: `tavily`, `brave-search`, `arxiv`,
-`semantic-scholar`, `firecrawl`, `github`.
+In Copilot CLI, run `/mcp` and copy server entries from `mcp-servers.json`.
+Recommended: `tavily`, `brave-search`, `arxiv`, `semantic-scholar`,
+`firecrawl`, `github`.
 
 | Service | Free tier | Used by |
 |---|---|---|
@@ -79,19 +104,26 @@ Then in the session:
 > Run deep research on "AI agent frameworks for developer productivity"
 ```
 
-Or with full control:
+For full enterprise control:
 
 ```
 > Use run_deep_research with topic "serverless AI inference",
   depth "deep", focus_areas [web_trends, academic_papers, market_analysis,
-  competitor_analysis, tech_landscape], autonomy "interactive",
-  enable_code_validation true
+  competitor_analysis, tech_landscape, developer_sentiment, funding_activity],
+  autonomy "interactive", enable_code_validation true
 ```
 
 For overnight autonomous runs use `autonomy: auto` (default) and Shift+Tab
 into autopilot mode.
 
 ## Common patterns
+
+### Memory-first investigation
+```
+> Recall any prior research on "vector databases" before planning.
+```
+The orchestrator will query memory and either build on prior reports or
+proceed fresh.
 
 ### Quick concept explainer
 ```
@@ -104,10 +136,10 @@ into autopilot mode.
   and pypi_packages ["langchain"].
 ```
 
-### Critique an existing draft
+### Critique an existing draft (cross-model)
 ```
-> Red-team-critique research-output/2026-04-22-abc123-foo-report.md focusing
-  on market-size claims.
+> Red-team-critique research-output/<id>-<slug>-report.md focusing
+  on market-size claims, critic_model "gpt-5.4".
 ```
 
 ### Brainstorm with code-validation
@@ -124,36 +156,68 @@ into autopilot mode.
   extensions/research-orchestrator/extension.mjs   # The orchestrator
   instructions/
     research.instructions.md         # Falsification, confidence tags, source tiers
-    orchestration.instructions.md    # When/how to spawn subagents
+    orchestration.instructions.md    # When/how to spawn subagents (all 7 phases)
     code-validation.instructions.md  # When/how to validate with code
+    memory.instructions.md           # Cross-session memory recall discipline
 mcp-servers.json                     # MCP server reference config
 .env.example                         # API key template
 research-output/                     # All artifacts saved here
+  _memory-index.md                   # Auto-built memory of past reports
   <id>-<slug>-plan.md
-  <id>-<slug>-notes/<area>.md
-  <id>-<slug>-artifacts/
+  <id>-<slug>-notes/
+    <area>.md                        # Per-specialist findings
+    fillin-<slug>.md                 # Adaptive gap-fill outputs
+    _audit.md                        # Completeness audit
+  <id>-<slug>-artifacts/             # Code, data, charts
   <id>-<slug>-critique.md
   <id>-<slug>-citations.md
-  <id>-<slug>-report.md
+  <id>-<slug>-report.md              # Final, auto-indexed
   <id>-<slug>-ideas.md
 ```
 
-## Why this works
+## Why this works (epistemic design notes)
 
+- **Memory recall first** — avoids redundant work; later reports build on earlier
 - **Multi-agent decomposition** — each specialist focuses on one slice; better
   signal than one big prompt
 - **Parallel execution** — N specialists in roughly the wall-clock of one
+- **Multi-query reformulation** — 3 rephrasings per claim recovers retrieval
+  recall lost by treating search as fixed
 - **Falsification by default** — every important claim runs an adversarial
   search pair before it's allowed in the report
+- **Completeness audit** — explicit gap detection prevents silent omissions
+- **Adaptive fill-in** — supervisor spawns more specialists dynamically, not
+  just upfront
 - **Confidence tagging** — calibration matters more than confidence
 - **Code validation** — numbers get recomputed, not just quoted
-- **Red-team pass** — separate adversarial agent finds what the writer missed
+- **Multi-model red-team** — critic on different model family = independent error
+- **Confidence escalation** — low-confidence on key claims triggers more research
 - **Citation verification** — every URL is opened and the claim is checked
+- **Memory update** — final report becomes input for next investigation
 
 ## Extending
 
 - Add MCP servers via `/mcp` in Copilot CLI
 - Add focus areas: edit `SPECIALISTS` in
   `.github/extensions/research-orchestrator/extension.mjs`
-- Tighten or relax methodology in `.github/instructions/`
+- Change critic model: edit `CRITIC_MODEL` constant (or pass `critic_model` per call)
+- Tighten or relax methodology: edit files in `.github/instructions/`
 - After editing the extension, run `extensions_reload` in CLI (no restart needed)
+
+## References (the literature behind v2)
+
+- **MIA — Memory Intelligence Agent** (arXiv 2604.04503, Apr 2026) — Manager-Planner-Executor
+  with non-parametric memory + on-the-fly test-time learning
+- **HiRAS — Hierarchical Research Agent System** (arXiv 2604.17745, Apr 2026) — supervisory
+  managers coordinating specialists across stages
+- **CoSearch** (arXiv 2604.17555, Apr 2026) — joint training of reasoner + ranker;
+  showed fixed retrieval leaves 26.8% F1 on the table
+- **SeekerGym** (arXiv 2604.17143, Apr 2026) — completeness-of-retrieval benchmark;
+  best agents retrieve only 42.5% of relevant Wikipedia passages
+- **LiteResearcher** (arXiv 2604.17931, Apr 2026) — agentic-RL training framework
+  (not adopted; out of scope for prompt-orchestration)
+- Anthropic "How we built our multi-agent research system" — orchestrator-workers
+- STORM (Shao et al. 2024) — outline-first writing
+- Reflexion (Shinn et al. 2023), Self-Refine (Madaan et al. 2023) — critique loops
+- ReAct (Yao et al. 2022) — reason + act with tools
+- PAL (Gao et al. 2022) — program-aided validation

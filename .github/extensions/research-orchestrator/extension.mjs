@@ -1,19 +1,38 @@
-// Research Orchestrator — Multi-Agent Edition
+// Research Orchestrator — Multi-Agent Edition v2 (Enterprise)
 //
-// Hybrid orchestrator-workers architecture:
-//   plan → parallel specialists → synthesize → red-team → revise → verify citations
+// Hybrid orchestrator-workers + memory + adaptive supervision:
+//   recall prior research → plan → parallel specialists (multi-query) →
+//   completeness audit → adaptive gap-fill → citation-grounded synthesis →
+//   multi-model red-team → confidence-based escalation → citation verify
 //
 // Each tool sends a structured prompt to the main agent (Claude), which then
-// uses its `task` tool to spawn sub-agents in parallel. State flows through
-// files in research-output/<id>-*; never through giant prompts.
+// uses its `task` tool to spawn sub-agents in parallel — including critique
+// agents on a *different* model family for variance reduction. State flows
+// through files in research-output/<id>-*; never through giant prompts.
+//
+// v2 additions over v1 (informed by Apr 2026 literature: MIA, HiRAS,
+// CoSearch, SeekerGym):
+// - Cross-session memory: index of all past reports, queryable + auto-surfaced
+// - Completeness audit: dedicated phase that detects gaps, can spawn fill-ins
+// - Adaptive supervision: orchestrator dynamically spawns more specialists
+// - Multi-query reformulation: 3 query variants per decision-critical claim
+// - Multi-model critique: red-team uses different model family (gpt-5.4)
+// - Confidence escalation: 🟠/⚡ findings auto-trigger deeper search
+// - Citation-grounded synthesis: synthesizer must inline-quote evidence
 
 import { joinSession } from "@github/copilot-sdk/extension";
-import { mkdirSync, existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename, isAbsolute, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const RESEARCH_DIR = join(process.cwd(), "research-output");
 if (!existsSync(RESEARCH_DIR)) mkdirSync(RESEARCH_DIR, { recursive: true });
+
+const MEMORY_INDEX_PATH = join(RESEARCH_DIR, "_memory-index.md");
+
+// Default critic model — different family from the orchestrator (Claude).
+// Gives variance reduction on critique. Can be overridden per-call.
+const CRITIC_MODEL = "gpt-5.4";
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -55,6 +74,116 @@ function safeResolveReport(p) {
 }
 
 let researchInFlight = false;
+
+// ─── Memory layer ───────────────────────────────────────────────────────
+//
+// Auto-built index of all past reports under research-output/. Surfaced to
+// the planner on session start; queryable via the `recall_prior_research`
+// tool. Inspired by MIA (arXiv 2604.04503): trajectory memory + planner
+// consultation.
+
+function listPastReports() {
+  try {
+    return readdirSync(RESEARCH_DIR)
+      .filter((f) => f.endsWith("-report.md"))
+      .map((f) => {
+        const p = join(RESEARCH_DIR, f);
+        const s = statSync(p);
+        return { name: f, path: p, mtime: s.mtime, size: s.size };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch { return []; }
+}
+
+function extractTldr(content, maxLen = 600) {
+  // Pull "## TL;DR" through next heading, or first 600 chars of the first
+  // section, whichever is more useful.
+  const tldrMatch = content.match(/##\s+TL;DR[^\n]*\n([\s\S]*?)(?=\n##\s|\n#\s|$)/i);
+  if (tldrMatch) return tldrMatch[1].trim().slice(0, maxLen);
+  const summaryMatch = content.match(/##\s+Executive Summary[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i);
+  if (summaryMatch) return summaryMatch[1].trim().slice(0, maxLen);
+  return content.slice(0, maxLen);
+}
+
+function extractTitle(content, fallback) {
+  const m = content.match(/^#\s+(.+)$/m);
+  return m ? m[1].trim() : fallback;
+}
+
+function rebuildMemoryIndex() {
+  const reports = listPastReports();
+  const lines = [
+    "# Research Memory Index",
+    `*Auto-generated. ${reports.length} report(s) on file. Last refreshed: ${new Date().toISOString().slice(0, 19)}Z.*`,
+    "",
+    "This index is consulted by the planner before every new research run.",
+    "If a topic overlaps with prior work, the planner builds on it instead of",
+    "duplicating effort. Use the `recall_prior_research` tool to query.",
+    "",
+    "---",
+    "",
+  ];
+  for (const r of reports) {
+    try {
+      const content = readFileSync(r.path, "utf8");
+      const title = extractTitle(content, r.name);
+      const tldr = extractTldr(content);
+      lines.push(`## ${title}`);
+      lines.push(`**File**: \`${r.path}\``);
+      lines.push(`**Updated**: ${r.mtime.toISOString().slice(0, 10)} | **Size**: ${(r.size / 1024).toFixed(1)}KB`);
+      lines.push("");
+      lines.push(tldr);
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+    } catch { /* skip unreadable */ }
+  }
+  try { writeFileSync(MEMORY_INDEX_PATH, lines.join("\n")); } catch { /* ignore */ }
+  return reports.length;
+}
+
+function memoryDigestForContext() {
+  const reports = listPastReports();
+  if (reports.length === 0) return null;
+  const top = reports.slice(0, 8).map((r) => {
+    try {
+      const content = readFileSync(r.path, "utf8");
+      const title = extractTitle(content, r.name);
+      return `- ${title} — \`${r.path}\` (${r.mtime.toISOString().slice(0, 10)})`;
+    } catch { return `- ${r.name}`; }
+  });
+  return `**Memory** (${reports.length} prior report(s)):\n${top.join("\n")}\n\nUse the \`recall_prior_research\` tool to retrieve specifics. The full index is at \`${MEMORY_INDEX_PATH}\`.`;
+}
+
+function searchMemory(query, max = 5) {
+  const reports = listPastReports();
+  const tokens = query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
+  if (!tokens.length) return [];
+  const scored = [];
+  for (const r of reports) {
+    try {
+      const content = readFileSync(r.path, "utf8").toLowerCase();
+      let score = 0;
+      const hits = [];
+      for (const t of tokens) {
+        const count = (content.match(new RegExp(`\\b${t}\\b`, "g")) || []).length;
+        if (count > 0) { score += count; hits.push(t); }
+      }
+      if (score > 0) {
+        const raw = readFileSync(r.path, "utf8");
+        scored.push({
+          path: r.path,
+          title: extractTitle(raw, r.name),
+          score,
+          hits,
+          tldr: extractTldr(raw, 400),
+          mtime: r.mtime,
+        });
+      }
+    } catch { /* skip */ }
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, max);
+}
 
 // ─── Specialist scope library ───────────────────────────────────────────
 //
@@ -188,11 +317,18 @@ function buildSpecialistDispatch(topic, areas, depth, paths) {
 \`\`\`
 ${spec.brief(topic, depth)}
 
+Multi-query reformulation (CoSearch-inspired, mandatory):
+- For each of your 3 most decision-critical claims, issue at least 3 query
+  REPHRASINGS (different angles, synonyms, jargon vs plain language).
+- Dedupe URLs across rephrasings; read the union, not the intersection.
+- Note in your notes: "Top claim X verified against N independent results."
+
 Output contract:
-- Write full findings (markdown, ~1500–2500 words depending on depth) to: ${notesPath}
-- Use confidence tags (✅/🔵/🟠/⚡) on conclusions and numbers
-- Cite sources as [Title, Date](URL) and tier them (Primary / Independent / Vendor)
-- End with: "What I'm least sure about" + "What would change this conclusion"
+- Write full findings (markdown, ~2000–3500 words for deep / 1500 for standard) to: ${notesPath}
+- Use confidence tags (✅/🔵/🟠/⚡/❓) on conclusions and numbers
+- Cite sources as [Title, Date](URL); tier them (Primary / Independent / Vendor)
+- For each major claim, INLINE-QUOTE the supporting passage (1-2 sentences) — paraphrase + cite is not enough
+- End with: "What I'm least sure about" + "What would change this conclusion" + "Coverage gaps I noticed"
 - Return to the orchestrator: a 200-word summary + the file path. NOT the full content.
 \`\`\``;
   }).filter(Boolean);
@@ -205,6 +341,46 @@ Output contract:
 
 const session = await joinSession({
   tools: [
+    // ─── 0. recall_prior_research ────────────────────────────────────
+    {
+      name: "recall_prior_research",
+      description: "Search the cross-session memory of past research reports. Returns ranked excerpts from prior reports that overlap with a query. Inspired by MIA (arXiv 2604.04503) — every research run should consult memory before planning to avoid redundant work and to build on prior findings.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Topic or question to search past reports for" },
+          max_results: { type: "number", description: "Max reports to return (default 5)" },
+          full_content: { type: "boolean", description: "If true, return full file contents of top match (default false — returns excerpts only)" },
+        },
+        required: ["query"],
+      },
+      handler: async (args) => {
+        const max = args.max_results || 5;
+        const results = searchMemory(args.query, max);
+        if (results.length === 0) {
+          return JSON.stringify({ status: "no_matches", query: args.query, suggestion: "No prior research overlaps with this query — proceed with a fresh plan." });
+        }
+        const out = {
+          status: "matches_found",
+          query: args.query,
+          count: results.length,
+          memory_index: MEMORY_INDEX_PATH,
+          matches: results.map((r) => ({
+            title: r.title,
+            path: r.path,
+            updated: r.mtime.toISOString().slice(0, 10),
+            relevance_hits: r.hits,
+            score: r.score,
+            tldr: r.tldr,
+          })),
+        };
+        if (args.full_content && results[0]) {
+          try { out.top_match_full_content = readFileSync(results[0].path, "utf8"); } catch {}
+        }
+        return JSON.stringify(out, null, 2);
+      },
+    },
+
     // ─── 1. plan_research ────────────────────────────────────────────
     {
       name: "plan_research",
@@ -361,10 +537,23 @@ Workspace (already created):
 
 ---
 
+## PHASE 0 — MEMORY RECALL (NEW)
+
+Before planning, call \`recall_prior_research\` with the topic. Review any
+matches:
+- If a prior report fully covers the topic → tell the user, ask if they want
+  a refresh or a new angle. Do not duplicate work.
+- If a prior report is adjacent → cite it as input to the planner; the new
+  plan should build on it, not repeat it.
+- If no matches → proceed with a fresh plan and note "no prior research".
+
+---
+
 ## PHASE 1 — PLAN
 ${args.continue_from_plan ? `Plan already exists at \`${paths.plan}\` — read it and proceed to Phase 2.` :
 `Use the \`plan_research\` tool, OR draft the plan inline and save it to \`${paths.plan}\`.
-The plan must list specialist assignments, adversarial pairs, and code-validation candidates.`}
+The plan must list specialist assignments, adversarial pairs, and code-validation candidates.
+**Reference any prior reports surfaced in Phase 0** in the plan's "Prior context" section.`}
 
 ${autonomy === "interactive" ? `**Interactive mode**: After saving the plan, output a one-paragraph summary
 and STOP. Wait for the user to approve or revise before continuing to Phase 2.
@@ -380,7 +569,8 @@ calls in a SINGLE response** — that is the only way they run truly in parallel
 Cap at ${maxParallel} concurrent.
 
 Each specialist must follow \`.github/instructions/research.instructions.md\`
-(falsification, confidence tags, source tiers).
+(falsification, confidence tags, source tiers, multi-query reformulation,
+inline-quote evidence).
 
 ${dispatch}
 
@@ -389,41 +579,85 @@ collect their summaries and notes paths.
 
 ---
 
-## PHASE 3 — SYNTHESIS
+## PHASE 2.5 — COMPLETENESS AUDIT (NEW — adaptive supervision)
 
-When all specialists report in:
-1. Read each notes file (use \`view\`, not full reads of giant files)
-2. Identify cross-cutting themes — don't just concatenate
+Once ALL specialists report in, call \`completeness_audit\`:
+\`\`\`
+notes_dir: "${paths.notesDir}"
+topic: "${topic}"
+focus_areas: ${JSON.stringify(areas)}
+\`\`\`
+
+Read the audit verdict:
+- 🟢 → proceed to Phase 3 (synthesis)
+- 🟡 → spawn the recommended fill-in specialists (in parallel, same way as
+  Phase 2). Each writes to \`${paths.notesDir}/fillin-<slug>.md\`. Then
+  proceed to Phase 3, including the fill-in notes.
+- 🔴 → re-plan and rerun primary research. Don't synthesize on a broken base.
+
+This is the "adaptive supervisor" pattern (HiRAS-inspired): the supervisor
+(you) decides specialist scope dynamically, not just upfront.
+
+---
+
+## PHASE 3 — CITATION-GROUNDED SYNTHESIS
+
+When coverage is sufficient:
+1. Read each notes file (use \`view\` with view_range, not giant reads)
+2. Identify cross-cutting themes — don't just concatenate sections
 3. Resolve contradictions or surface them as ⚡ Contested
 4. Draft the report to \`${paths.report}\` using the schema below
+
+**Citation discipline (mandatory)**: every decision-relevant claim must
+include either an inline-quoted passage from a source OR a \`[code-verified]\`
+artifact link. Paraphrase + bare citation is INSUFFICIENT — that's where
+hallucinations hide. Format:
+> "<exact quote, ≤2 sentences>" — [Source Title, Date](URL) — Tier: Primary/Independent/Vendor
 
 ${codeVal ? `## PHASE 3.5 — CODE VALIDATION
 
 For each quantitative claim flagged in the plan as a validation candidate,
-invoke \`validate_with_code\` (or directly write a Python script via \`bash\`).
-Save artifacts to \`${paths.artifacts}/\`. Annotate validated claims in the
-report with \`[code-verified](./<artifact>.md)\`.` : ""}
+invoke \`validate_with_code\`. Save artifacts to \`${paths.artifacts}/\`.
+Annotate validated claims with \`[code-verified](./<artifact>.md)\`.` : ""}
 
 ---
 
-## PHASE 4 — RED-TEAM CRITIQUE
+## PHASE 4 — MULTI-MODEL RED-TEAM CRITIQUE
 
-Use the \`red_team_critique\` tool, OR spawn a \`rubber-duck\` agent
-(\`mode: "sync"\`) with the draft report path. Save the critique to
-\`${paths.critique}\`.
+Call \`red_team_critique\` with \`target_path: "${paths.report}"\`. The tool
+spawns a rubber-duck agent on a **different model family** (default: ${CRITIC_MODEL})
+for variance reduction — the critic catches what the orchestrator's model would miss.
 
-## PHASE 5 — REVISE
+Save the critique to \`${paths.critique}\`.
 
-Address each critique point. If a real gap is exposed → spawn a focused
-specialist to fill it (Phase 2-style), then revise again. If evidence is
-genuinely thin → downgrade the confidence tag, don't paper over.
+## PHASE 5 — REVISE + CONFIDENCE-BASED ESCALATION (NEW)
+
+1. Address every "Top 3 Priority" critique finding.
+2. **Confidence escalation**: scan the draft for any 🟠 Speculative or
+   ⚡ Contested tag attached to a *decision-relevant* claim (anything in
+   TL;DR, Executive Summary, or Opportunities). For each:
+   - Spawn ONE focused specialist (\`task\`, general-purpose, background) to
+     dig deeper, with brief: "find primary evidence for/against <claim>;
+     return updated tag (✅/🔵/🟠/⚡) with rationale."
+   - Run these in parallel.
+3. After fill-in evidence comes back, revise tags and update the report.
+4. If evidence is genuinely thin after the dig → keep the low confidence tag
+   and explicitly say so. Don't paper over.
 
 ## PHASE 6 — CITATION VERIFICATION
 
-Use the \`citation_verifier\` tool on \`${paths.report}\`. It will fetch
-each cited URL and check claim support, writing results to \`${paths.citations}\`.
-After verification: remove or downgrade any unsupported claims, then
-overwrite \`${paths.report}\` with the final version.
+Call \`citation_verifier\` on \`${paths.report}\`. It fetches each cited URL
+and checks claim support, writing results to \`${paths.citations}\`.
+
+After verification: remove unsupported claims, downgrade partial ones,
+replace broken links. Overwrite \`${paths.report}\` with the final version.
+
+## PHASE 7 — MEMORY UPDATE (NEW)
+
+After the report is final:
+1. The session-end hook auto-rebuilds \`${MEMORY_INDEX_PATH}\`.
+2. Verify by reading the index and confirming this report's TL;DR is included.
+3. Log: "✅ Research complete and indexed in memory."
 
 ---
 
@@ -783,13 +1017,14 @@ Use confidence tags only on contested claims (e.g., "X is faster than Y").`;
     // ─── 6. red_team_critique ────────────────────────────────────────
     {
       name: "red_team_critique",
-      description: "Spawns an adversarial reviewer (rubber-duck agent) on a research report or any markdown file. Surfaces unsupported claims, hand-waved numbers, missing counter-evidence, biased framing, citation issues. Writes critique to disk.",
+      description: "Spawns an adversarial reviewer (rubber-duck agent) on a different model family for variance reduction. Surfaces unsupported claims, hand-waved numbers, missing counter-evidence, biased framing, citation issues. Writes critique to disk.",
       parameters: {
         type: "object",
         properties: {
           target_path: { type: "string", description: "Path to the markdown file to critique (must be in research-output/)" },
           focus: { type: "string", description: "Optional: specific concerns to focus on (e.g., 'numbers and market-size claims')" },
           output_path: { type: "string", description: "Where to write the critique (default: <target>-critique.md)" },
+          critic_model: { type: "string", description: `Override critic model (default: ${CRITIC_MODEL}). Use a different family from the orchestrator for variance reduction.` },
         },
         required: ["target_path"],
       },
@@ -800,22 +1035,32 @@ Use confidence tags only on contested claims (e.g., "X is faster than Y").`;
         const out = args.output_path
           ? (safeResolveReport(args.output_path) || join(RESEARCH_DIR, basename(args.output_path)))
           : target.replace(/\.md$/, "-critique.md");
+        const model = args.critic_model || CRITIC_MODEL;
 
-        await session.log(`🔴 Red-team critique: ${basename(target)}`);
+        await session.log(`🔴 Red-team critique: ${basename(target)} (critic model: ${model})`);
 
         const prompt = `# Red-Team Critique
 
 Target: \`${target}\`
 Output: \`${out}\`
+Critic model: **${model}** (different family from orchestrator for independent variance)
 ${args.focus ? `Specific focus: ${args.focus}` : ""}
 
 Step 1: Read the target file in full.
 
-Step 2: Spawn a \`rubber-duck\` agent (\`mode: "sync"\`) with this brief:
+Step 2: Spawn a \`rubber-duck\` agent with these parameters:
+\`\`\`
+agent_type: "rubber-duck"
+mode: "sync"
+model: "${model}"
+\`\`\`
+
+Brief for the rubber-duck:
 
 > You are an adversarial reviewer. The author wants you to find every weakness
 > a skeptical expert would notice. The author has explicitly invited a harsh
-> review — be direct, not diplomatic.
+> review — be direct, not diplomatic. Your independence (different model family)
+> is the point: surface what the author's model would miss.
 >
 > Read: ${target}
 >
@@ -830,7 +1075,8 @@ Step 2: Spawn a \`rubber-duck\` agent (\`mode: "sync"\`) with this brief:
 >    as "independent", same source double-counted
 > 7. **Confidence calibration** — claims tagged ✅ that should be 🟠, etc.
 > 8. **Hidden assumptions** — what does the conclusion depend on that's unstated?
-> ${args.focus ? `9. **Special focus**: ${args.focus}` : ""}
+> 9. **Evidence-quote mismatch** — does the inline quote actually support the claim?
+> ${args.focus ? `10. **Special focus**: ${args.focus}` : ""}
 >
 > For each issue: quote the exact passage, state the problem, suggest a fix
 > (more search, downgrade tag, remove claim).
@@ -842,7 +1088,7 @@ Step 3: Write the critique output to \`${out}\` in this format:
 
 \`\`\`markdown
 # Red-Team Critique: ${basename(target)}
-*Reviewer: rubber-duck agent | Date: ${new Date().toISOString().slice(0, 10)}*
+*Reviewer: rubber-duck agent (${model}) | Date: ${new Date().toISOString().slice(0, 10)}*
 
 ## Verdict
 🟢 Solid / 🟡 Fixable / 🔴 Substantial revision needed
@@ -865,7 +1111,7 @@ Step 3: Write the critique output to \`${out}\` in this format:
 \`\`\``;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "critique_initiated", target_path: target, output_path: out });
+        return JSON.stringify({ status: "critique_initiated", target_path: target, output_path: out, critic_model: model });
       },
     },
 
@@ -1031,6 +1277,97 @@ What you did, in one paragraph. Include assumptions, date range, sample size.
       },
     },
 
+    // ─── 8.5. completeness_audit ─────────────────────────────────────
+    {
+      name: "completeness_audit",
+      description: "Audit a directory of specialist research notes for coverage gaps, contradictions, thin areas, and overrepresented sources. Recommends which gap-fill specialists to spawn before synthesis. Inspired by SeekerGym (arXiv 2604.17143) finding that even SOTA agents miss >50% of relevant information silently.",
+      parameters: {
+        type: "object",
+        properties: {
+          notes_dir: { type: "string", description: "Path to the specialists' notes directory (must be inside research-output/)" },
+          topic: { type: "string", description: "The original research topic" },
+          focus_areas: { type: "array", items: { type: "string" }, description: "The specialist areas that ran" },
+          output_path: { type: "string", description: "Where to write the audit report (default: <notes_dir>/_audit.md)" },
+        },
+        required: ["notes_dir", "topic"],
+      },
+      handler: async (args) => {
+        const notesDir = safeResolveReport(args.notes_dir);
+        if (!notesDir) return `notes_dir not found at ${args.notes_dir} (must be inside research-output/).`;
+        const out = args.output_path
+          ? (safeResolveReport(args.output_path) || join(notesDir, "_audit.md"))
+          : join(notesDir, "_audit.md");
+
+        await session.log(`🔍 Completeness audit on ${basename(notesDir)}`);
+
+        const prompt = `# Completeness Audit
+
+Topic: **${args.topic}**
+Notes directory: \`${notesDir}\`
+${args.focus_areas?.length ? `Focus areas covered: ${args.focus_areas.join(", ")}` : ""}
+Output: \`${out}\`
+
+## Method (do NOT spawn subagents — you do this yourself)
+
+1. List every file in \`${notesDir}\` (use \`glob\`).
+2. Read each notes file (use \`view\`).
+3. Build a coverage matrix: for the topic "${args.topic}", what dimensions
+   SHOULD a complete answer cover? (E.g.: market size, competitors, technical
+   feasibility, regulation, real users, failure modes, alternatives, history.)
+   Mark which are well-covered, partial, or missing.
+4. Look for these specific failure modes:
+   - **Coverage gaps**: dimensions no specialist explored
+   - **Source concentration**: same 2-3 sources cited by multiple specialists
+     (suggests echo chamber, not independent corroboration)
+   - **Vendor-only sourcing**: a key claim only cited by self-published sources
+   - **Single-side framing**: pro-X evidence collected but no falsification done
+   - **Confidence inflation**: ✅ Verified tags backed by only 1 source
+   - **Contradictions**: specialist A says X, specialist B implies not-X
+   - **Date staleness**: claims relying on >18-month-old data in a fast-moving area
+   - **Geographic/cultural narrowness**: only US/English sources for a global topic
+5. For each material gap, generate a "fill-in specialist brief" — a 100-word
+   task description for a focused subagent that would close the gap.
+
+## Output: \`${out}\`
+
+\`\`\`markdown
+# Completeness Audit: ${args.topic}
+*Date: ${new Date().toISOString().slice(0, 10)}*
+
+## Verdict
+🟢 Ready for synthesis / 🟡 Needs targeted fill-ins / 🔴 Substantial gaps; rerun specialists
+
+## Coverage Matrix
+| Dimension | Coverage | Specialist | Quality |
+|---|---|---|---|
+| ... | ✅/🟡/🔴 | ... | brief note |
+
+## Gaps requiring fill-in specialists
+For each gap (priority-ordered):
+### Gap N: <name>
+- **What's missing**: ...
+- **Why it matters for the conclusion**: ...
+- **Fill-in brief** (paste-ready for spawning a task agent):
+  > Specialist focus: <100-word brief>
+- **Output file**: \`${notesDir}/fillin-<slug>.md\`
+
+## Other issues (no fill-in needed, just flag for synthesis)
+- Source concentration: ...
+- Contradictions: ...
+- Confidence inflation: ...
+
+## Recommended action
+"Spawn N fill-in specialists" / "Proceed to synthesis with caveats" / "Rerun primary research"
+\`\`\`
+
+After writing, output to chat: the verdict + count of fill-ins recommended.
+The orchestrator will then decide whether to spawn them.`;
+
+        setTimeout(() => session.send({ prompt }), 100);
+        return JSON.stringify({ status: "audit_initiated", notes_dir: notesDir, output_path: out });
+      },
+    },
+
     // ─── 9. brainstorm_from_research ─────────────────────────────────
     {
       name: "brainstorm_from_research",
@@ -1180,29 +1517,38 @@ Save to: \`${ideasPath}\``;
 
   hooks: {
     onSessionStart: async () => {
-      await session.log("🔬 Research Orchestrator (multi-agent) loaded");
+      const count = rebuildMemoryIndex();
+      await session.log(`🔬 Research Orchestrator v2 (enterprise multi-agent) loaded — ${count} prior report(s) indexed`);
+      const memoryDigest = memoryDigestForContext();
       return {
-        additionalContext: `Research orchestrator active — multi-agent, falsification-first.
+        additionalContext: `Research orchestrator v2 active — enterprise multi-agent, falsification-first, with cross-session memory and adaptive supervision.
+
+**Pipeline (informed by Apr 2026 literature: MIA, HiRAS, CoSearch, SeekerGym):**
+\`recall memory → plan → parallel specialists (multi-query) → completeness audit → adaptive gap-fill → citation-grounded synthesis → multi-model red-team → confidence escalation → citation verify → memory update\`
 
 **Tools**
+- \`recall_prior_research\` — query memory of past reports (always run first on a new topic)
 - \`plan_research\` — generate a structured research plan
-- \`run_deep_research\` — full hybrid pipeline (plan → parallel specialists → critique → synth → cite-verify)
+- \`run_deep_research\` — full hybrid pipeline with all enterprise phases
 - \`deep_paper_search\` — arXiv + Semantic Scholar with citation-graph traversal
 - \`trend_quantifier\` — GitHub/npm/PyPI/Trends/jobs with code-validated curves
 - \`concept_explainer\` — layered technical breakdowns with runnable code
-- \`red_team_critique\` — adversarial review of a draft (uses rubber-duck agent)
+- \`completeness_audit\` — gap detection on specialist notes; recommends fill-ins
+- \`red_team_critique\` — adversarial review on a *different model family* (default ${CRITIC_MODEL})
 - \`citation_verifier\` — fetch each cited URL, check claim support
-- \`validate_with_code\` — Python validation of a quantitative claim (Monte Carlo, trend fit, CI)
-- \`brainstorm_from_research\` — stress-tested project ideas (with optional code-validation)
+- \`validate_with_code\` — Python validation (Monte Carlo, trend fit, CI, recompute, benchmark)
+- \`brainstorm_from_research\` — stress-tested project ideas (with optional code validation)
 - \`list_research_reports\` — index of everything in research-output/
 
 **Methodology lives in:**
-\`.github/instructions/research.instructions.md\` (falsification, confidence tags, source tiers)
-\`.github/instructions/orchestration.instructions.md\` (when/how to spawn subagents)
+\`.github/instructions/research.instructions.md\` (falsification, confidence tags, source tiers, multi-query)
+\`.github/instructions/orchestration.instructions.md\` (when/how to spawn subagents, audit, escalation)
 \`.github/instructions/code-validation.instructions.md\` (when/how to write validation code)
+\`.github/instructions/memory.instructions.md\` (cross-session memory, recall discipline)
 
-Default for \`run_deep_research\`: autonomy=auto, code_validation=true.
-Use autonomy=interactive to pause after planning.`,
+**Enterprise defaults**: \`autonomy=auto\`, \`enable_code_validation=true\`, critic model = ${CRITIC_MODEL} (different family from orchestrator).
+
+${memoryDigest || "_(No prior research on file. Memory will accumulate as you run new investigations.)_"}`,
       };
     },
 
@@ -1211,7 +1557,21 @@ Use autonomy=interactive to pause after planning.`,
       const path = String(args.path || args.file_path || "");
       if ((input.toolName === "create" || input.toolName === "edit") && path.includes("research-output")) {
         await session.log(`📄 ${input.toolName === "create" ? "Saved" : "Updated"}: ${path}`);
+        // Refresh the memory index whenever a final report is written.
+        if (path.endsWith("-report.md")) {
+          try {
+            const n = rebuildMemoryIndex();
+            await session.log(`🧠 Memory index refreshed (${n} reports)`, { ephemeral: true });
+          } catch { /* ignore */ }
+        }
       }
+    },
+
+    onSessionEnd: async () => {
+      try {
+        const n = rebuildMemoryIndex();
+        return { sessionSummary: `Research orchestrator v2: memory index refreshed with ${n} report(s).` };
+      } catch { return undefined; }
     },
 
     onErrorOccurred: async (input) => {
@@ -1227,7 +1587,7 @@ session.on("session.idle", async () => {
   try {
     const reports = readdirSync(RESEARCH_DIR).filter((f) => f.endsWith("-report.md"));
     if (reports.length > 0) {
-      await session.log(`✅ ${reports.length} report(s) in ./research-output/`, { ephemeral: true });
+      await session.log(`✅ ${reports.length} report(s) in ./research-output/ | memory: ${MEMORY_INDEX_PATH}`, { ephemeral: true });
     }
   } catch { /* ignore */ }
 });
