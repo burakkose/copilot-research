@@ -519,13 +519,22 @@ thread each quote came from. How has sentiment shifted vs. 6-12 months ago?`,
     brief: (topic) => `Investment activity in "${topic}".
 
 Search surfaces:
+- **The funding_pulse tool** — call it FIRST with subject="${topic}" and
+  window_days=90 to get a fresh, cross-referenced list of recent rounds
+  pulled from SEC EDGAR Form D (primary source), Crunchbase News RSS,
+  TechCrunch venture RSS, HN Algolia, and layoffs.fyi. Use the resulting
+  funding-pulse report as your structured input — then layer historical
+  context, investor theses, and post-mortems on top of it.
 - Crunchbase (free tier), CB Insights free reports, PitchBook free briefs
 - TechCrunch funding rounds, The Information, Axios Pro Rata, Dealroom
-- SEC EDGAR for any S-1 / 10-K / 8-K filings
+- SEC EDGAR for any S-1 / 10-K / 8-K filings (use the EDGAR full-text
+  search at https://efts.sec.gov/LATEST/search-index)
 - Investor blogs: a16z, Sequoia, Bessemer, Index, Accel, ICONIQ — read
   their thesis posts on this space if any
 - LinkedIn for hiring velocity (often a sharper funding signal than
   announced rounds — search "<company> hiring" + headcount changes)
+- layoffs.fyi (https://layoffs.fyi/) — sector layoffs as a downside signal
+- levels.fyi for compensation data (cuts indicate stress)
 
 Signal check: one large round ≠ market validation. Look for BREADTH — how
 many independent firms are investing across multiple companies?
@@ -536,7 +545,8 @@ Deliver:
 - Acqui-hires (talent grab) vs. strategic acquisitions
 - Companies that raised big and collapsed — what went wrong?
 - Down rounds, layoffs, valuation cuts in this space (search:
-  "<segment> layoffs", layoffs.fyi, levels.fyi compensation cuts)`,
+  "<segment> layoffs", layoffs.fyi, levels.fyi compensation cuts)
+- Cross-cycle context: how does this period compare to 12 / 24 months ago?`,
   },
   social_pulse: {
     title: "Social Listening: Reddit / HackerNews / X / Forums",
@@ -1355,6 +1365,186 @@ List of files in \`${artifactsDir}/\`.
 
         setTimeout(() => session.send({ prompt }), 100);
         return JSON.stringify({ status: "trend_quantifier_initiated", subject, artifacts_dir: artifactsDir, output_path: out });
+      },
+    },
+
+    // ─── 4b. funding_pulse ───────────────────────────────────────────
+    {
+      name: "funding_pulse",
+      description: "Pull the latest funding activity for a topic/sector from REAL-TIME public sources (no paid API needed): SEC EDGAR Form D RSS (primary source — actual filed private placements), Crunchbase News RSS, TechCrunch /venture/ RSS, HackerNews Algolia (for '<startup> raises'), and layoffs.fyi (downside signal). Cross-references rounds across sources, flags single-source claims, and writes a structured funding-pulse report. Use this for 'what funded this week/month' questions or as a fresh-data input to the funding_activity specialist.",
+      parameters: {
+        type: "object",
+        properties: {
+          subject: { type: "string", description: "Topic, sector, or company-name keyword to filter by (e.g. 'AI agents', 'vector database', 'climate tech')" },
+          window_days: { type: "number", description: "Look-back window in days (default 30)" },
+          companies: { type: "array", items: { type: "string" }, description: "Optional: specific company names to track. If provided, results are filtered to these companies in addition to subject keyword." },
+          investors: { type: "array", items: { type: "string" }, description: "Optional: specific investors to track (e.g. 'a16z', 'Sequoia'). Filters by lead/co-investor mentions." },
+          include_layoffs: { type: "boolean", description: "Also pull recent layoffs in this sector (downside signal). Default true." },
+          output_path: { type: "string", description: "Optional output path under research-output/" },
+        },
+        required: ["subject"],
+      },
+      handler: async (args) => {
+        const subject = args.subject;
+        const windowDays = args.window_days || 30;
+        const companies = args.companies || [];
+        const investors = args.investors || [];
+        const includeLayoffs = args.include_layoffs !== false;
+        const id = newReportId();
+        const slug = slugify(subject);
+        const out = args.output_path
+          ? safeResolveReport(args.output_path) || join(RESEARCH_DIR, `${id}-${slug}-funding-pulse.md`)
+          : join(RESEARCH_DIR, `${id}-${slug}-funding-pulse.md`);
+        const artifactsDir = join(RESEARCH_DIR, `${id}-${slug}-funding-artifacts`);
+        if (!existsSync(artifactsDir)) mkdirSync(artifactsDir, { recursive: true });
+
+        await session.log(`💰 Funding pulse: "${subject}" (last ${windowDays}d)`);
+
+        const prompt = `# Funding Pulse — "${subject}" (last ${windowDays} days)
+
+You are a funding-data specialist. Pull the LATEST funding activity from
+REAL-TIME public sources, cross-reference across surfaces, and write the
+result to \`${out}\`. Use \`${artifactsDir}/\` for any raw data dumps.
+
+═══════════════════════════════════════════════════════════════════
+DATA SOURCES (use ALL — each is free and needs no API key)
+═══════════════════════════════════════════════════════════════════
+
+**1. SEC EDGAR Form D RSS — PRIMARY SOURCE (actual filed private placements)**
+Form D is the legally required filing for private securities offerings
+(most VC rounds). It's the closest thing to ground-truth funding data.
+
+Latest 100 Form D filings (Atom feed):
+\`\`\`
+curl -A 'research-orchestrator/2.3 (contact@example.com)' \\
+  'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=D&dateb=&owner=include&count=100&output=atom'
+\`\`\`
+EDGAR full-text search (note: must include a real User-Agent or SEC blocks):
+\`\`\`
+curl -A 'research-orchestrator/2.3 (contact@example.com)' \\
+  'https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(subject)}%22&dateRange=custom&startdt=$(date -d "${windowDays} days ago" +%Y-%m-%d)&enddt=$(date +%Y-%m-%d)&forms=D'
+\`\`\`
+For each interesting filing, the actual Form D PDF/HTML is linked from the
+filing page — open it to extract: company name, total offering amount,
+amount sold to date, named investors, date of first sale.
+
+**2. Crunchbase News RSS** (curated rounds with context)
+\`\`\`
+curl 'https://news.crunchbase.com/feed/'
+curl 'https://news.crunchbase.com/sections/venture/feed/'
+curl 'https://news.crunchbase.com/sections/ma/feed/'
+\`\`\`
+Filter items whose title/description mentions "${subject}"${companies.length ? ` or any of: ${companies.join(", ")}` : ""}.
+
+**3. TechCrunch venture RSS**
+\`\`\`
+curl 'https://techcrunch.com/category/venture/feed/'
+curl 'https://techcrunch.com/category/startups/feed/'
+\`\`\`
+Same keyword filter. TC is fast but vendor-PR-heavy; corroborate with EDGAR.
+
+**4. HackerNews Algolia (search the last ${windowDays} days)**
+\`\`\`
+SINCE=$(($(date +%s) - ${windowDays}*86400))
+curl "https://hn.algolia.com/api/v1/search_by_date?query=${encodeURIComponent(subject + " raises OR funding OR Series")}&numericFilters=created_at_i>$SINCE&hitsPerPage=50"
+\`\`\`
+Read top comments — practitioners often spot inflation or undisclosed
+weaknesses before press releases catch up.
+
+**5. Other targeted surfaces** (use as needed):
+- Axios Pro Rata (newsletter archive): site:axios.com pro-rata
+- The Information's Briefing: site:theinformation.com
+- Dealroom press releases: site:dealroom.co
+- StrictlyVC: site:strictlyvc.com
+- Sifted (EU rounds): site:sifted.eu
+- LinkedIn round announcements: \`"${subject}" "Series" "led by" site:linkedin.com\`
+
+${investors.length ? `**Investor-targeted (filter to these LPs/funds): ${investors.join(", ")}**
+For each: \`site:<investor-domain>.com 2026\` — many post deal announcements;
+also \`"${investors.join('" OR "')}" "led" "Series"\` web search.
+` : ""}
+${includeLayoffs ? `**6. layoffs.fyi (downside signal — required cross-check)**
+\`\`\`
+curl 'https://layoffs.fyi/' | grep -oE '"company":"[^"]+","location":"[^"]+","industry":"[^"]+","total_laid_off":[0-9]+,"date":"[^"]+"' | head -50
+\`\`\`
+Or fetch the underlying CSV/JSON if their format has changed. Filter to
+companies in the "${subject}" sector. A sector that's both raising AND
+shedding staff is in correction — say so.
+` : ""}
+
+═══════════════════════════════════════════════════════════════════
+DEPTH CONTRACT
+═══════════════════════════════════════════════════════════════════
+Floor for ${windowDays}-day window:
+  ▸ ≥ 8 distinct funding events surfaced (or "fewer because the sector is
+    quiet — here's the evidence the search was thorough")
+  ▸ ≥ 5 cross-referenced (round appears in ≥2 of the 5 sources above)
+  ▸ ≥ 3 with a SEC Form D primary-source link (treat single-source rounds
+    as 🟠 Speculative until corroborated)
+  ▸ Layoffs cross-check completed${includeLayoffs ? "" : " (skipped per flag)"}
+
+Anti-laziness: searching ≠ reading. For each round you list, you must have
+opened either (a) the SEC filing, (b) the Crunchbase News article, or
+(c) the TechCrunch piece — not just relied on a headline snippet.
+
+═══════════════════════════════════════════════════════════════════
+OUTPUT — write to \`${out}\`
+═══════════════════════════════════════════════════════════════════
+
+\`\`\`markdown
+# Funding Pulse: ${subject}
+*Window: last ${windowDays} days | Generated: ${new Date().toISOString().slice(0, 10)} | Pipeline: funding_pulse v2.3*
+
+## TL;DR
+- N rounds totalling $X disclosed across the window
+- Largest round: <Co> — $Y led by <Investor>
+- Most active investor: <Investor> (M deals)
+- Sector temperature: 🔥 hot / 😐 steady / 🧊 cooling — with one-line justification
+
+## Recent rounds (sorted by date desc)
+
+| Date | Company | Stage | Amount | Lead | Co-investors | Source(s) | Confidence |
+|---|---|---|---|---|---|---|---|
+
+For each row: Source(s) lists the URLs you actually opened. Confidence:
+✅ if SEC Form D + ≥1 press confirmation; 🔵 if 2+ independent press;
+🟠 if single source.
+
+## Investor activity heatmap
+Investors ranked by # of deals in the window for this sector. For each:
+named deals + thesis (link to their thesis post if any).
+
+## Notable narratives
+1-3 themes: e.g. "infra-layer rounds dominate vs application-layer",
+"down-rounds clustered in <segment>". Quote verbatim from sources.
+
+${includeLayoffs ? `## Sector-side cross-check (layoffs.fyi)
+Layoffs in this sector during the window. If raise-vs-layoff ratio is
+unhealthy, flag it.
+` : ""}
+## Single-source / unverified items
+Rounds that appeared in only one source. Listed for transparency, NOT
+in the headline tally.
+
+## Coverage gaps
+- Any source that returned nothing or was blocked (and why)
+- Sectors / sub-segments not covered in this run
+
+## Methodology
+- Sources queried (with date)
+- Total candidate rounds before dedupe / after dedupe
+- Filter terms applied: "${subject}"${companies.length ? `, ${companies.join(", ")}` : ""}${investors.length ? `, investors: ${investors.join(", ")}` : ""}
+\`\`\`
+
+When done, log: "✅ Funding pulse complete: ${out}" and return a 150-word summary.`;
+
+        setTimeout(() => session.send({ prompt }), 100);
+        return JSON.stringify({
+          status: "funding_pulse_initiated",
+          subject, window_days: windowDays,
+          companies, investors, include_layoffs: includeLayoffs,
+          output_path: out, artifacts_dir: artifactsDir,
+        });
       },
     },
 

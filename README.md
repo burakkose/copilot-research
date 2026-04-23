@@ -23,6 +23,7 @@ parallel specialists           CoSearch-inspired multi-query reformulation
   ├── tech_landscape            ↳ engineering blogs (Netflix/Uber/Stripe...) + QCon/KubeCon
   ├── developer_sentiment       ↳ GitHub + StackOverflow + Lobsters + dev.to
   ├── funding_activity          ↳ Crunchbase + TechCrunch + a16z/Sequoia + layoffs.fyi
+  │                              (orchestrates the funding_pulse tool for fresh rounds)
   └── social_pulse              ↳ Reddit (multiple subs) + HackerNews (Algolia) +
                                   X/Twitter + practitioner Substacks
         ↓
@@ -72,6 +73,7 @@ so specialists never have an "I couldn't search there" excuse.
 |---|---|---|
 | `recall_prior_research` | 0 | Query cross-session memory of past reports |
 | `enforce_depth_floors` | 2.4 | Anti-laziness gate: programmatically check word/URL/quote/adversarial-pair floors per specialist; returns a respawn directive for any below floor |
+| `funding_pulse` | Standalone | **Real-time funding feed** — pulls fresh rounds from SEC EDGAR Form D RSS (primary), Crunchbase News RSS, TechCrunch venture RSS, HN Algolia, layoffs.fyi; cross-references across surfaces; flags single-source claims |
 | `plan_research` | 1 | Decompose topic → specialist scopes + adversarial searches |
 | `run_deep_research` | All | Full enterprise pipeline (configurable autonomy) |
 | `deep_paper_search` | Specialist | arXiv + Semantic Scholar with citation-graph traversal |
