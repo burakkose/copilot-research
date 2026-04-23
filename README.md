@@ -1,4 +1,4 @@
-# 🔬 Research Agent
+# copilot-research
 
 A multi-agent research and brainstorming extension for GitHub Copilot
 CLI. Give it a topic; it plans the work, runs specialist sub-agents in
@@ -35,6 +35,7 @@ papers (MIA, HiRAS, CoSearch, SeekerGym) — see [References](#references).
 - [Why this works (epistemic design)](#why-this-works-epistemic-design)
 - [Extending](#extending)
 - [References](#references-the-literature-behind-the-design)
+- [License](#license)
 
 ---
 
@@ -456,7 +457,8 @@ critic_model: "gpt-5.4" | …                    # default: gpt-5.4
 
 ---
 
-## License & contributions
+## License
 
-Personal research workspace. Use it however you want; PRs welcome if
-you've added a specialist or surface that's worth sharing.
+MIT — see [LICENSE](./LICENSE).
+
+PRs welcome if you've added a specialist or data surface that's worth sharing.
