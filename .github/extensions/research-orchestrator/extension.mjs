@@ -34,6 +34,28 @@ const MEMORY_INDEX_PATH = join(RESEARCH_DIR, "_memory-index.md");
 // Gives variance reduction on critique. Can be overridden per-call.
 const CRITIC_MODEL = "gpt-5.4";
 
+// ─── Anti-laziness depth floors ─────────────────────────────────────────
+//
+// Per-specialist minimums. If a specialist returns a note below these
+// floors, the orchestrator auto-respawns it with "INSUFFICIENT — keep
+// digging" until it complies. Cost is intentionally high — that's the
+// point of the enterprise tier.
+
+const DEPTH_FLOORS = {
+  quick:    { words: 800,  urls: 8,  quotes: 4,  adversarial_pairs: 2 },
+  standard: { words: 1800, urls: 18, quotes: 10, adversarial_pairs: 4 },
+  deep:     { words: 3000, urls: 30, quotes: 18, adversarial_pairs: 6 },
+};
+
+// Per-platform floors for the social_pulse specialist (in addition to
+// the depth floor). Each row = "you MUST surface at least N items from
+// this platform spanning M distinct sources/threads/subs".
+const SOCIAL_PLATFORM_FLOORS = {
+  quick:    { reddit_threads: 3, reddit_subs: 2, hn_threads: 3, hn_stories: 2, x_threads: 2, blog_posts: 2 },
+  standard: { reddit_threads: 6, reddit_subs: 3, hn_threads: 5, hn_stories: 3, x_threads: 4, blog_posts: 4 },
+  deep:     { reddit_threads: 10, reddit_subs: 4, hn_threads: 8, hn_stories: 4, x_threads: 6, blog_posts: 6 },
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const slugify = (t) =>
@@ -71,6 +93,55 @@ function safeResolveReport(p) {
   if (!abs.startsWith(RESEARCH_DIR)) return null;
   if (!existsSync(abs)) return null;
   return abs;
+}
+
+// Count distinct URLs in a markdown blob. Catches both [text](url) and
+// bare http(s)://… URLs. Used by the depth-floor checker.
+function countDistinctUrls(md) {
+  const urls = new Set();
+  const reMd = /\]\((https?:\/\/[^\s)]+)\)/g;
+  const reBare = /(?<![("\w])(https?:\/\/[^\s)<>"\]]+)/g;
+  let m;
+  while ((m = reMd.exec(md)) !== null) urls.add(m[1].split("#")[0]);
+  while ((m = reBare.exec(md)) !== null) urls.add(m[1].split("#")[0]);
+  return urls.size;
+}
+
+// Count inline verbatim quotes — block quotes (> "...") or inline ".." -- attribution.
+function countInlineQuotes(md) {
+  // Block quote with quoted span on the same line:  > "..."   or  > "..."
+  const reBlockQuote = /^\s*>\s*[""].+?[""]/gm;
+  // Or any " ... " ≥ 30 chars followed within 80 chars by a markdown link
+  const reInlineCited = /[""][^""\n]{30,}?[""]\s*[—–\-]\s*\[[^\]]+\]\(https?:\/\//g;
+  return (md.match(reBlockQuote) || []).length + (md.match(reInlineCited) || []).length;
+}
+
+function wordCount(md) {
+  return (md.match(/\b\w[\w'\-]*\b/g) || []).length;
+}
+
+// Programmatic depth-floor check on a single specialist's notes file.
+// Returns { area, path, words, urls, quotes, missing: [...], passed: bool }.
+function checkDepthFloors(area, notesPath, depth) {
+  const f = DEPTH_FLOORS[depth] || DEPTH_FLOORS.standard;
+  let content = "";
+  try { content = readFileSync(notesPath, "utf8"); } catch {
+    return { area, path: notesPath, exists: false, passed: false, missing: ["file_missing"] };
+  }
+  const w = wordCount(content);
+  const u = countDistinctUrls(content);
+  const q = countInlineQuotes(content);
+  const missing = [];
+  if (w < f.words)  missing.push(`words(${w}/${f.words})`);
+  if (u < f.urls)   missing.push(`urls(${u}/${f.urls})`);
+  if (q < f.quotes) missing.push(`quotes(${q}/${f.quotes})`);
+  return {
+    area, path: notesPath, exists: true,
+    words: w, urls: u, quotes: q,
+    floors: f,
+    missing,
+    passed: missing.length === 0,
+  };
 }
 
 let researchInFlight = false;
@@ -281,12 +352,21 @@ function searchMemory(query, max = 5, opts = {}) {
 const SPECIALISTS = {
   web_trends: {
     title: "Web Trends & Practitioner Sentiment",
-    brief: (topic) => `Map what practitioners, pundits and critics are saying about "${topic}".
+    brief: (topic) => `Map what practitioners, pundits and critics are saying about "${topic}" across the open web.
 
-Adversarial pairs (run BOTH):
+Search surfaces (use AT LEAST 4):
+- Tavily / Brave web search with adversarial query pairs
+- Firecrawl for JS-heavy publisher pages (TechCrunch, The Information, etc.)
+- Google site filters: site:techcrunch.com, site:theverge.com, site:arstechnica.com,
+  site:theinformation.com, site:stratechery.com, site:platformer.news,
+  site:substack.com, site:medium.com, site:dev.to
+- Long-form practitioner blogs (search '"why we ${topic}" OR "we evaluated ${topic}"')
+
+Adversarial pairs (run BOTH sides of EACH):
 - "${topic} adoption 2025 2026" ↔ "${topic} overhyped" / "why I stopped using ${topic}"
-- "${topic} best practices" ↔ "${topic} problems" / "${topic} migration away"
-- "${topic} success stories" ↔ "${topic} postmortem"
+- "${topic} best practices" ↔ "${topic} problems" / "${topic} migration away from"
+- "${topic} success stories" ↔ "${topic} postmortem" / "${topic} regret"
+- "${topic} compared to" ↔ "${topic} alternative replaced"
 
 Deliver:
 - What's gaining traction and WHY (adoption metrics > buzz)
@@ -297,19 +377,30 @@ Deliver:
   },
   academic_papers: {
     title: "Academic Papers & Citation Graph",
-    brief: (topic, depth) => `Find ${depth === "deep" ? "10–15" : "6–8"} relevant papers on "${topic}".
+    brief: (topic, depth) => `Find ${depth === "deep" ? "15-25" : depth === "standard" ? "8-12" : "5-7"} relevant papers on "${topic}".
 
-Use arXiv + Semantic Scholar. Prefer: recent + cited + survey + critical.
+Search surfaces (use ALL that apply):
+- arXiv MCP: search title+abstract
+- Semantic Scholar MCP: citation graph traversal (citedBy + references)
+- Google Scholar via Tavily: \`site:scholar.google.com "${topic}"\` and the
+  same with quotes around key sub-terms
+- connectedpapers.com — visual citation neighbourhoods
+- paperswithcode.com — code-backed papers with reproducible benchmarks
+- OpenReview (NeurIPS/ICLR/ICML) for peer-review discussion
+- Google Scholar advanced operators: \`"${topic}" inurl:pdf since:2024\`
 
 Strategy:
-1. Direct topic search (3 query rephrasings)
+1. Direct topic search (3 query rephrasings — different jargon levels)
 2. Survey/review papers (field consensus)
-3. Negative-result and replication papers
+3. Negative-result, replication, and "limitations of ${topic}" papers
 4. Citation-graph traversal: for the top 2 most-cited papers, find papers
-   that cite them critically (not just admiringly)
+   that cite them critically (look in the "Related Work" / "Limitations" / "vs"
+   sections of the citers, not just admiring mentions)
+5. Track author overlap — beware of single-lab echo chambers
 
-Per paper: title, authors, date, arXiv/DOI link, key findings (specific
-numbers when present), methodology, known limitations or critiques.
+Per paper: title, authors, venue, date, arXiv/DOI link, citation count
+(Semantic Scholar), key findings (specific numbers when present),
+methodology, known limitations or critiques, who has built on it.
 
 Tag confidence on the field's consensus: ✅/🔵/🟠/⚡.`,
   },
@@ -317,13 +408,24 @@ Tag confidence on the field's consensus: ✅/🔵/🟠/⚡.`,
     title: "Market Analysis & Sizing",
     brief: (topic) => `Quantify the market for "${topic}".
 
+Search surfaces:
+- Tavily / Brave web search
+- Site filters: site:gartner.com, site:forrester.com, site:idc.com,
+  site:cbinsights.com, site:pitchbook.com, site:crunchbase.com,
+  site:reuters.com, site:bloomberg.com, site:ft.com, site:wsj.com,
+  site:sec.gov (10-K and S-1 filings), site:investor.<company>.com
+- Macrotrends / Statista for time-series
+- Industry trade press for the relevant vertical
+
 Adversarial pairs:
 - "${topic} market size" ↔ "${topic} forecast accuracy" / "${topic} bubble"
 - "${topic} TAM" ↔ "${topic} reality vs hype"
+- "${topic} growth" ↔ "${topic} slowdown" / "${topic} layoffs"
 
 Deliver:
 - Market size from 2+ INDEPENDENT analyst sources (note methodology differences)
 - If sources disagree by >2× → explain why, don't average
+- Ground numbers in primary sources where possible (10-Ks, S-1s, earnings calls)
 - Key players ranked by actual position (revenue / users > self-reported claims)
 - Funding & M&A activity (12mo)
 - Hype-cycle position with justification
@@ -336,58 +438,167 @@ tool: recompute CAGR, run sensitivity, build a TAM Monte Carlo.`,
     title: "Competitor & Alternative Landscape",
     brief: (topic) => `Map competitors and alternatives in the "${topic}" space.
 
-Search sequence:
-1. Direct competitors (named tools/products)
+Search sequence (each must produce findings):
+1. Direct competitors (named tools/products) — search the segment, then
+   cross-check against G2, Capterra, Gartner Peer Insights, Product Hunt
 2. "alternative to <each major player>" — surfaces non-obvious ones
-3. "<competitor> review" + "<competitor> complaints" — real user experience
-4. "<competitor> shutdown OR pivot OR layoffs" — failures
+3. "<competitor> review" + "<competitor> complaints" + "<competitor> sucks" —
+   real user experience; check Reddit, Trustpilot, G2 reviews
+4. "<competitor> shutdown OR pivot OR layoffs OR acquisition" — failures
+5. "<competitor> vs <competitor>" — practitioner head-to-heads
+6. Indie / OSS alternatives via GitHub topic search and AlternativeTo.net
 
-Per competitor: what they do, pricing, traction (hard metrics > claims),
-what users praise, what users complain about, what they got wrong.
+Per competitor: what they do, pricing, traction (hard metrics > claims —
+revenue, paying customers, GitHub stars + issue velocity, hiring rate from
+LinkedIn/job boards), what users praise, what users complain about, what
+they got wrong, recent strategic shifts.
 
-Build a comparison matrix. Weaknesses must be as visible as strengths.`,
+Build a comparison matrix (table). Weaknesses must be as visible as strengths.`,
   },
   tech_landscape: {
     title: "Technology Landscape & Maturity",
     brief: (topic) => `Map the tech ecosystem around "${topic}".
 
 Maturity test: per technology, search for production case studies (mature)
-vs. only launch announcements/demos (early). Note the difference.
+vs. only launch announcements/demos (early). Note the difference. A talk
+at a vendor conf is NOT a production case study.
+
+Search surfaces:
+- GitHub topic search + GitHub trending
+- thenewstack.io, infoq.com, highscalability.com — engineering case studies
+- Each vendor's "customers" page (treat as claims) cross-referenced with
+  independent confirmations
+- Site filters: site:engineering.<bigco>.com (Netflix, Uber, Airbnb,
+  Stripe, Shopify, Pinterest, LinkedIn, Spotify, etc.)
+- Conference talk archives: QCon, KubeCon, Strange Loop, Velocity
 
 Deliver:
 - Established vs. emerging tools, with maturity evidence per tool
 - Architecture patterns from PRACTITIONERS (not just docs)
-- Integration pain points (search complaints / workarounds)
-- Developer experience: learning curve, docs, community health
-- Graveyard: tools/frameworks abandoned and why (links to postmortems)`,
+- Integration pain points (search complaints / workarounds on Reddit + HN)
+- Developer experience: learning curve, docs, community health (issue
+  response time, PR throughput, discussion activity)
+- Graveyard: tools/frameworks abandoned and why (link to postmortems)`,
   },
   developer_sentiment: {
     title: "Developer Community Sentiment",
-    brief: (topic) => `Analyze developer sentiment for "${topic}".
+    brief: (topic) => `Analyze developer sentiment for "${topic}" across the developer-facing surfaces.
+
+Search surfaces (all required for depth=deep, ≥3 for standard):
+- GitHub: stars over time (use the trend_quantifier tool — don't eyeball),
+  open vs closed issue ratio, time-to-close, PR throughput, contributor
+  bus factor (read CONTRIBUTORS), recent issues mentioning regressions
+- HackerNews via Algolia API:
+    \`curl 'https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&hitsPerPage=30'\`
+    Then for promising story IDs:
+    \`curl 'https://hn.algolia.com/api/v1/items/<story_id>'\` to get the
+    full discussion. Read the TOP comments, not just the headlines.
+- Reddit: search r/programming, r/ExperiencedDevs, r/cscareerquestions,
+  r/webdev, r/MachineLearning, r/devops, r/sre, plus topic-specific subs.
+    \`curl -H 'User-Agent: research-bot/1.0' 'https://www.reddit.com/search.json?q=${encodeURIComponent(topic)}&limit=25&sort=relevance&t=year'\`
+    Read the comments, not just titles. Sort by 'top' for substantive ones.
+- Stack Overflow tag trends + new questions vs answer rate
+- Lobsters (lobste.rs) — practitioner-only counterweight to HN
+- Dev.to + Hashnode for first-person dev experience
+- YouTube tech channels (Fireship, ThePrimeagen, etc.) for sentiment shifts
+- Job postings: ask the trend_quantifier tool to count keyword occurrences
+  in LinkedIn / WeWorkRemotely / hnhiring (Whoishiring threads aggregated)
 
 Reality checks (apply rigorously):
 - GitHub stars ≠ adoption. Check issue activity, commit frequency, bus factor.
 - Growing SO questions = growing adoption OR growing confusion — distinguish.
-- Blog posts ≠ usage.
+- Blog posts ≠ usage; vendor conference talks ≠ usage.
+- A loud minority on Twitter ≠ majority sentiment.
 
-Search separately: enthusiasts, critics, daily practitioners. How has sentiment
-shifted vs. 6–12 months ago? Job postings mentioning this skill — trending up?
-
-Use the trend_quantifier tool for hard numbers (stars, downloads, jobs).`,
+Search separately: enthusiasts, critics, daily practitioners. Quote
+representative comments verbatim. Note which subreddit / HN story / X
+thread each quote came from. How has sentiment shifted vs. 6-12 months ago?`,
   },
   funding_activity: {
     title: "Funding & Investment Activity",
     brief: (topic) => `Investment activity in "${topic}".
 
+Search surfaces:
+- Crunchbase (free tier), CB Insights free reports, PitchBook free briefs
+- TechCrunch funding rounds, The Information, Axios Pro Rata, Dealroom
+- SEC EDGAR for any S-1 / 10-K / 8-K filings
+- Investor blogs: a16z, Sequoia, Bessemer, Index, Accel, ICONIQ — read
+  their thesis posts on this space if any
+- LinkedIn for hiring velocity (often a sharper funding signal than
+  announced rounds — search "<company> hiring" + headcount changes)
+
 Signal check: one large round ≠ market validation. Look for BREADTH — how
 many independent firms are investing across multiple companies?
 
 Deliver:
-- Recent rounds (12mo) with amounts, leads, co-investors
+- Recent rounds (12mo) with amounts, leads, co-investors (table)
 - Investor theses and their track record in this space
 - Acqui-hires (talent grab) vs. strategic acquisitions
 - Companies that raised big and collapsed — what went wrong?
-- Down rounds, layoffs, valuation cuts in this space`,
+- Down rounds, layoffs, valuation cuts in this space (search:
+  "<segment> layoffs", layoffs.fyi, levels.fyi compensation cuts)`,
+  },
+  social_pulse: {
+    title: "Social Listening: Reddit / HackerNews / X / Forums",
+    brief: (topic, depth) => {
+      const f = SOCIAL_PLATFORM_FLOORS[depth] || SOCIAL_PLATFORM_FLOORS.standard;
+      return `Mine the social-and-forum substrate for what real people are saying about "${topic}".
+This is where unfiltered sentiment, war stories, and pain points live —
+the stuff that polished blog posts and analyst reports miss.
+
+You MUST surface concrete quotes from:
+- ≥${f.reddit_threads} Reddit threads spanning ≥${f.reddit_subs} different subreddits
+- ≥${f.hn_threads} HackerNews comments spanning ≥${f.hn_stories} different stories
+- ≥${f.x_threads} X/Twitter posts or threads (use Tavily site:x.com / site:twitter.com /
+  site:nitter.net; or web-search "<topic> twitter thread")
+- ≥${f.blog_posts} long-form practitioner blog posts (Substack, dev.to, Hashnode,
+  personal blogs surfaced via "${topic} blog" or HN "Show HN" / "Ask HN")
+
+EXACT URL templates to use (curl them; record the URL you fetched):
+
+Reddit search (no key needed; use a real User-Agent):
+  curl -H 'User-Agent: research-bot/1.0' \\
+    'https://www.reddit.com/search.json?q=${encodeURIComponent(topic)}&limit=25&sort=relevance&t=year'
+Then for each promising thread:
+  curl -H 'User-Agent: research-bot/1.0' 'https://www.reddit.com<permalink>.json?limit=200'
+Subreddit-targeted: append \`&restrict_sr=1\` to a subreddit-scoped URL like
+  https://www.reddit.com/r/MachineLearning/search.json?q=...&restrict_sr=1
+
+HackerNews (Algolia):
+  curl 'https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&hitsPerPage=30&tags=story'
+  curl 'https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(topic)}&hitsPerPage=50&tags=comment'
+Then dive into specific stories:
+  curl 'https://hn.algolia.com/api/v1/items/<objectID>'   # full nested thread
+
+X/Twitter (no free API): use Tavily/Brave with these queries —
+  "${topic}" site:x.com
+  "${topic}" site:twitter.com
+  "${topic}" site:nitter.net
+  "${topic} thread" site:threadreaderapp.com
+Look for technical practitioners (verified accounts, named individuals).
+
+Forums to also check:
+- Lobsters: \`https://lobste.rs/search?q=${encodeURIComponent(topic)}\`
+- Lemmy (programming.dev): web search "${topic} site:programming.dev"
+- Discourse instances for the relevant ecosystem (e.g. discuss.python.org,
+  forum.rust-lang.org) — use site: filters
+
+Adversarial discipline:
+- Read the TOP-VOTED comments AND the TOP-CONTRARIAN comments per thread
+- Quote BOTH sides verbatim
+- Note demographic skew of each platform (HN = startup/infra-heavy,
+  r/cscareerquestions = early-career, r/ExperiencedDevs = senior, etc.)
+- A single viral post is not a trend — show breadth across N independent threads
+
+Deliver:
+- A list of representative VERBATIM quotes (≥2 sentences each), each with
+  the URL and platform/sub
+- Tally: how many positive vs negative vs neutral mentions across the corpus
+- Recurring complaints (frequency-ranked)
+- Recurring praise (frequency-ranked)
+- Emerging memes / shorthand the community uses for this topic
+- Single-source claims to NOT trust; corroborated claims to flag as 🔵+`;
+    },
   },
 };
 
@@ -396,6 +607,7 @@ const ALL_AREAS = Object.keys(SPECIALISTS);
 // ─── Tasks (focus-area prompt blocks) ───────────────────────────────────
 
 function buildSpecialistDispatch(topic, areas, depth, paths) {
+  const f = DEPTH_FLOORS[depth] || DEPTH_FLOORS.standard;
   const lines = areas.map((area) => {
     const spec = SPECIALISTS[area];
     if (!spec) return null;
@@ -405,18 +617,74 @@ function buildSpecialistDispatch(topic, areas, depth, paths) {
 \`\`\`
 ${spec.brief(topic, depth)}
 
+═══════════════════════════════════════════════════════════════════
+DEPTH CONTRACT (enterprise tier — cost is no object, depth IS the goal)
+═══════════════════════════════════════════════════════════════════
+You are NOT done until ALL of the following floors are met for ${depth}:
+
+  ▸ Word count of your notes file:           ≥ ${f.words} words
+  ▸ Distinct URLs you actually OPENED:        ≥ ${f.urls}
+  ▸ Inline verbatim quotes (≥1 sentence):    ≥ ${f.quotes}
+  ▸ Adversarial query pairs run end-to-end:  ≥ ${f.adversarial_pairs}
+
+These are FLOORS, not targets. If your work is below any floor when you
+start writing the summary, GO BACK and dig further. The orchestrator will
+PROGRAMMATICALLY check these floors and respawn you with "INSUFFICIENT"
+if any are missed — saving you from a wasted respawn is just doing it
+right the first time.
+
 Multi-query reformulation (CoSearch-inspired, mandatory):
-- For each of your 3 most decision-critical claims, issue at least 3 query
-  REPHRASINGS (different angles, synonyms, jargon vs plain language).
+- For each of your most decision-critical claims, issue at least 3 query
+  REPHRASINGS (different angles, synonyms, jargon vs plain language,
+  practitioner vs vendor framing).
 - Dedupe URLs across rephrasings; read the union, not the intersection.
 - Note in your notes: "Top claim X verified against N independent results."
 
+Anti-laziness rules (these are the most common failure modes):
+1. SEARCHING ≠ READING. A URL in your bibliography that you didn't actually
+   open is dishonest. Open every URL you cite (use Firecrawl or curl/view
+   for static pages).
+2. PARAPHRASE + CITE is INSUFFICIENT. Inline-quote the supporting passage
+   verbatim (≤2 sentences), then cite. Hallucinations hide in paraphrase.
+3. ONE SOURCE IS NOT EVIDENCE. Any decision-relevant claim needs ≥2
+   independent sources (independent = not citing the same original).
+4. NO VENDOR-ONLY EVIDENCE. A vendor blog claiming X is a CLAIM, not
+   evidence. Find the independent corroboration or downgrade the tag.
+5. NO STOPPING ON FIRST AGREEMENT. After you find supporting evidence,
+   you MUST run the falsification query and report what you find — even
+   if it weakens your conclusion. Especially if it weakens your conclusion.
+6. NO PADDING. Floors are about substance, not word inflation. If you can't
+   hit the floor with substance, that itself is a finding — say so
+   explicitly and explain why the topic is under-researched.
+
+Self-audit (write this checklist VERBATIM at the END of your notes file,
+filled in honestly):
+
+\`\`\`
+## Self-Audit
+- Word count: ___ / floor ${f.words}                    [PASS / FAIL]
+- Distinct URLs opened: ___ / floor ${f.urls}            [PASS / FAIL]
+- Inline verbatim quotes: ___ / floor ${f.quotes}        [PASS / FAIL]
+- Adversarial pairs run: ___ / floor ${f.adversarial_pairs} (list them below)
+   1. <pair>
+   2. <pair>
+   ...
+- URLs I actually opened (not just searched), spot-check list of 5+:
+   1. <url>
+   ...
+- Single-source claims I'm flagging 🟠/⚡ for honesty: <count>
+- Counter-evidence I found that weakens the headline finding:
+   <list, or "none after genuine search">
+- Coverage gaps the orchestrator should know about:
+   <list>
+\`\`\`
+
 Output contract:
-- Write full findings (markdown, ~2000–3500 words for deep / 1500 for standard) to: ${notesPath}
+- Write full findings (markdown) to: ${notesPath}
 - Use confidence tags (✅/🔵/🟠/⚡/❓) on conclusions and numbers
 - Cite sources as [Title, Date](URL); tier them (Primary / Independent / Vendor)
-- For each major claim, INLINE-QUOTE the supporting passage (1-2 sentences) — paraphrase + cite is not enough
-- End with: "What I'm least sure about" + "What would change this conclusion" + "Coverage gaps I noticed"
+- For each major claim, INLINE-QUOTE the supporting passage (≤2 sentences) — paraphrase + cite is not enough
+- End with: "What I'm least sure about" + "What would change this conclusion" + "Coverage gaps I noticed" + the Self-Audit block above
 - Return to the orchestrator: a 200-word summary + the file path. NOT the full content.
 \`\`\``;
   }).filter(Boolean);
@@ -470,6 +738,44 @@ const session = await joinSession({
       },
     },
 
+    // ─── 0b. enforce_depth_floors ────────────────────────────────────
+    {
+      name: "enforce_depth_floors",
+      description: "Programmatically check whether a specialist's notes file meets the enterprise depth floors (word count, distinct URLs opened, inline verbatim quotes). Returns a per-area pass/fail report. Use this in Phase 2.4 (after specialists return) to identify which need to be respawned with 'INSUFFICIENT — keep digging'. Cost is no object; depth is the goal.",
+      parameters: {
+        type: "object",
+        properties: {
+          notes_dir: { type: "string", description: "Path to the specialists' notes directory (must be inside research-output/)" },
+          depth: { type: "string", enum: ["quick", "standard", "deep"], description: "The depth tier the run was launched at — determines floors" },
+          areas: { type: "array", items: { type: "string", enum: ALL_AREAS }, description: "Which specialist areas to check" },
+        },
+        required: ["notes_dir", "depth", "areas"],
+      },
+      handler: async (args) => {
+        const dir = safeResolveReport(args.notes_dir);
+        if (!dir) return JSON.stringify({ error: "notes_dir not found inside research-output/" });
+        const depth = args.depth || "standard";
+        const reports = args.areas.map((area) => {
+          const notesPath = join(dir, `${area}.md`);
+          return checkDepthFloors(area, notesPath, depth);
+        });
+        const failing = reports.filter((r) => !r.passed);
+        return JSON.stringify({
+          status: failing.length === 0 ? "all_floors_met" : "respawn_needed",
+          depth,
+          floors: DEPTH_FLOORS[depth] || DEPTH_FLOORS.standard,
+          per_specialist: reports,
+          respawn_areas: failing.map((r) => r.area),
+          respawn_directive: failing.length === 0 ? null :
+            `INSUFFICIENT depth on these specialists: ${failing.map((r) => `${r.area} (missing: ${r.missing.join(", ")})`).join("; ")}. ` +
+            `Respawn EACH failing specialist as a NEW task subagent with this prefix to its brief: ` +
+            `"⚠️ INSUFFICIENT — your previous notes file at <path> was below the depth floor. Specifically: <missing>. ` +
+            `Open the existing file, READ what you already have, and CONTINUE researching to reach the floor. ` +
+            `APPEND new findings; do not delete existing material. Then update the Self-Audit block honestly."`,
+        }, null, 2);
+      },
+    },
+
     // ─── 1. plan_research ────────────────────────────────────────────
     {
       name: "plan_research",
@@ -487,7 +793,7 @@ const session = await joinSession({
       handler: async (args) => {
         const topic = args.topic;
         const depth = args.depth || "standard";
-        const areas = args.focus_areas?.length ? args.focus_areas : ["web_trends", "academic_papers", "market_analysis"];
+        const areas = args.focus_areas?.length ? args.focus_areas : ["web_trends", "academic_papers", "market_analysis", "developer_sentiment", "social_pulse"];
         const id = newReportId();
         const slug = slugify(topic);
         const paths = reportPaths(id, slug);
@@ -583,7 +889,7 @@ After saving, output to chat:
 
         const topic = args.topic;
         const depth = args.depth || "standard";
-        const areas = args.focus_areas?.length ? args.focus_areas : ["web_trends", "academic_papers", "market_analysis"];
+        const areas = args.focus_areas?.length ? args.focus_areas : ["web_trends", "academic_papers", "market_analysis", "developer_sentiment", "social_pulse"];
         const autonomy = args.autonomy || "auto";
         const codeVal = args.enable_code_validation !== false;
         const format = args.output_format || "markdown";
@@ -665,6 +971,40 @@ ${dispatch}
 
 After spawning, end your turn. You will be notified as each completes;
 collect their summaries and notes paths.
+
+---
+
+## PHASE 2.4 — DEPTH-FLOOR ENFORCEMENT (anti-laziness gate)
+
+Once ALL specialists report in, **before** the completeness audit, run the
+programmatic depth-floor check:
+
+\`\`\`
+enforce_depth_floors:
+  notes_dir: "${paths.notesDir}"
+  depth: "${depth}"
+  areas: ${JSON.stringify(areas)}
+\`\`\`
+
+Read the response:
+
+- **status: all_floors_met** → proceed to Phase 2.5.
+- **status: respawn_needed** → for EACH area in \`respawn_areas\`, RESPAWN that
+  specialist as a NEW \`task\` subagent (parallel, single response, same as
+  Phase 2). Use the EXACT respawn_directive prefix returned by the tool
+  (it tells the agent specifically what's missing and to APPEND, not replace).
+  When respawned specialists return, run \`enforce_depth_floors\` AGAIN. Loop
+  until all_floors_met.
+
+Hard rule: you may NOT proceed to Phase 2.5 until \`enforce_depth_floors\`
+returns \`status: all_floors_met\`. This is the enterprise tier — cost is
+no object, depth is the goal. Stopping a specialist below floor is the
+single most common failure mode of "deep research" agents; this gate exists
+specifically to prevent it.
+
+If a specialist fails the floor 3 times in a row on the same area, log the
+failure mode in the report's "Methodology Notes" and proceed — but tag every
+finding from that area as 🟠 Speculative regardless of its in-text tag.
 
 ---
 

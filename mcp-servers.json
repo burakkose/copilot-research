@@ -48,6 +48,43 @@
       "command": "npx",
       "args": ["-y", "perplexity-mcp"],
       "env": { "PERPLEXITY_API_KEY": "${PERPLEXITY_API_KEY}" }
+    },
+    "reddit": {
+      "_role": "Reddit search & thread reading for social_pulse / developer_sentiment specialists. Public JSON endpoints work without auth at low rate; for production set REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET (free OAuth app).",
+      "_fallback": "Specialists can also `curl https://www.reddit.com/search.json?q=...` directly (no key needed) — see brief templates.",
+      "command": "uvx",
+      "args": ["mcp-server-reddit"],
+      "env": {
+        "REDDIT_CLIENT_ID": "${REDDIT_CLIENT_ID}",
+        "REDDIT_CLIENT_SECRET": "${REDDIT_CLIENT_SECRET}",
+        "REDDIT_USER_AGENT": "research-orchestrator/2.1"
+      }
+    },
+    "hackernews": {
+      "_role": "HackerNews search (Algolia) + item fetching for social_pulse. No API key required — Algolia HN API is public.",
+      "_fallback": "Specialists can curl `https://hn.algolia.com/api/v1/search?query=…` directly with no setup.",
+      "command": "uvx",
+      "args": ["mcp-hn"],
+      "env": {}
+    },
+    "google-scholar": {
+      "_role": "Google Scholar search for academic_papers specialist (complements arXiv + Semantic Scholar). Requires SerpAPI key; free tier = 100 searches/mo.",
+      "_fallback": "Specialists can use Tavily/Brave with `site:scholar.google.com` filter.",
+      "command": "uvx",
+      "args": ["mcp-scholarly"],
+      "env": { "SERPAPI_API_KEY": "${SERPAPI_API_KEY}" }
+    },
+    "twitter": {
+      "_role": "X/Twitter search for social_pulse. The official X API is paid-only since 2023; this server uses scraping fallbacks (rate-limited).",
+      "_fallback": "Use Tavily with `site:x.com` / `site:nitter.net` / `site:threadreaderapp.com` filters.",
+      "command": "npx",
+      "args": ["-y", "@enescinar/twitter-mcp"],
+      "env": {
+        "API_KEY": "${TWITTER_API_KEY}",
+        "API_SECRET_KEY": "${TWITTER_API_SECRET}",
+        "ACCESS_TOKEN": "${TWITTER_ACCESS_TOKEN}",
+        "ACCESS_TOKEN_SECRET": "${TWITTER_ACCESS_TOKEN_SECRET}"
+      }
     }
   }
 }

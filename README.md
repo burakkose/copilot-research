@@ -15,13 +15,19 @@ plan_research                  decompose into specialist scopes
         ↓
 parallel specialists           CoSearch-inspired multi-query reformulation
   ├── web_trends                ↳ inline-quote evidence (no paraphrase-and-cite)
-  ├── academic_papers
-  ├── market_analysis
-  ├── competitor_analysis
-  ├── tech_landscape
-  ├── developer_sentiment
-  └── funding_activity
+  ├── academic_papers           ↳ arXiv + Semantic Scholar + Google Scholar +
+  │                              connectedpapers + paperswithcode + OpenReview
+  ├── market_analysis           ↳ Gartner/Forrester/IDC/CB Insights/PitchBook/
+  │                              SEC EDGAR (10-K, S-1)
+  ├── competitor_analysis       ↳ G2 / Capterra / Product Hunt / AlternativeTo
+  ├── tech_landscape            ↳ engineering blogs (Netflix/Uber/Stripe...) + QCon/KubeCon
+  ├── developer_sentiment       ↳ GitHub + StackOverflow + Lobsters + dev.to
+  ├── funding_activity          ↳ Crunchbase + TechCrunch + a16z/Sequoia + layoffs.fyi
+  └── social_pulse              ↳ Reddit (multiple subs) + HackerNews (Algolia) +
+                                  X/Twitter + practitioner Substacks
         ↓
+enforce_depth_floors          anti-laziness gate — auto-respawn if any specialist
+        ↓                      is below word/URL/quote/adversarial-pair floor
 completeness_audit             SeekerGym-inspired gap detection
         ↓                       ↳ adaptive fill-in spawn (HiRAS-inspired)
 validate_with_code             PAL-style quantitative validation
@@ -37,11 +43,35 @@ citation_verifier              fetch every URL, check claim support
 memory update                  index report for future recall
 ```
 
+## Anti-laziness depth floors (v2.2)
+
+The single most common failure mode of "deep research" agents is stopping early.
+The orchestrator now enforces hard, programmatically-checked floors per
+specialist before allowing the pipeline to advance to synthesis:
+
+| Depth | Words | Distinct URLs | Inline quotes | Adversarial pairs |
+|---|---|---|---|---|
+| `quick`    |   800 |  8 |  4 | 2 |
+| `standard` | 1,800 | 18 | 10 | 4 |
+| `deep`     | 3,000 | 30 | 18 | 6 |
+
+If any specialist's notes fall below the floor, the orchestrator calls
+`enforce_depth_floors` → gets back a `respawn_directive` → respawns the
+specialist with `"⚠️ INSUFFICIENT — keep digging, APPEND don't replace"` and
+re-checks. This loops until the floor is met. **The agent cannot exit early.**
+
+For the `social_pulse` specialist, additional per-platform floors apply
+(deep tier: ≥10 Reddit threads from ≥4 subs, ≥8 HN comments from ≥4 stories,
+≥6 X/Twitter threads, ≥6 long-form blog posts). Curl templates for the public
+HackerNews Algolia API and Reddit `.json` endpoints are baked into the brief
+so specialists never have an "I couldn't search there" excuse.
+
 ## Tools
 
 | Tool | Phase | What it does |
 |---|---|---|
 | `recall_prior_research` | 0 | Query cross-session memory of past reports |
+| `enforce_depth_floors` | 2.4 | Anti-laziness gate: programmatically check word/URL/quote/adversarial-pair floors per specialist; returns a respawn directive for any below floor |
 | `plan_research` | 1 | Decompose topic → specialist scopes + adversarial searches |
 | `run_deep_research` | All | Full enterprise pipeline (configurable autonomy) |
 | `deep_paper_search` | Specialist | arXiv + Semantic Scholar with citation-graph traversal |
