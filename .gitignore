@@ -1,2 +1,6 @@
 .env
 node_modules/
+
+# Research output is generated locally; keep the folder via .gitkeep
+research-output/*
+!research-output/.gitkeep
