@@ -26,8 +26,10 @@ papers (MIA, HiRAS, CoSearch, SeekerGym) — see [References](#references).
 
 - [Quick start](#quick-start)
 - [Features](#features)
-- [The 11 tools](#the-11-tools)
+- [The 20 tools](#the-20-tools)
 - [Usage — every common workflow](#usage--every-common-workflow)
+- [Technical concept research (for engineers)](#technical-concept-research-for-engineers)
+- [Quality discipline (Gartner-grade)](#quality-discipline-gartner-grade)
 - [Pipeline diagram](#pipeline-diagram)
 - [Anti-laziness depth floors](#anti-laziness-depth-floors)
 - [Configuration](#configuration)
@@ -121,11 +123,13 @@ when an MCP server isn't configured.
 
 ---
 
-## The 11 tools
+## The 20 tools
 
 | Tool | Phase | What it does |
 |---|---|---|
 | `recall_prior_research` | 0 | Query cross-session memory of past reports (TF-IDF, threshold-filtered) |
+| `personal_context_profile` | Pre | Save your role/stack/constraints once; auto-injected into every run so findings get weighted against your reality |
+| `pre_register_research` | 0.5 | Lock dimensions, exclusion criteria, glossary, and falsifiability test BEFORE specialists run (clinical-trial-style pre-registration) |
 | `plan_research` | 1 | Decompose topic → specialist scopes + adversarial searches + code-validation candidates |
 | `run_deep_research` | All | Full pipeline: plan → specialists → audit → synth → critique → verify |
 | `enforce_depth_floors` | 2.4 | Anti-laziness gate — counts words/URLs/quotes per specialist; returns respawn directive for any below floor |
@@ -135,8 +139,12 @@ when an MCP server isn't configured.
 | `funding_pulse` | Standalone | **Real-time funding feed** — SEC EDGAR Form D + Crunchbase RSS + TechCrunch RSS + HN Algolia + layoffs.fyi, cross-referenced |
 | `concept_explainer` | Standalone | Layered breakdown (intuition → mechanics → math → code → comparison → pitfalls) |
 | `red_team_critique` | 4 | Adversarial review on a *different model family* |
-| `validate_with_code` | 3.5 | Python validation: Monte Carlo, trend fit, CI, recompute |
-| `citation_verifier` | 6 | Fetch every URL, check claim support |
+| `ensemble_critique` | 4 | 3-critic ensemble (Skeptic + Regulator + Practitioner) on different models — only findings surviving all three are publication-ready |
+| `bias_audit` | 5 | Explicit checklist (survivorship/hype/recency/vendor-narrative/echo-chamber/...) with documented pass/fail per bias |
+| `validate_with_code` | 3.5 | Python validation: Monte Carlo, trend fit, CI, recompute, benchmark |
+| `citation_verifier` | 6 | Fetch every URL, check claim support — requires **verbatim quotes** for ✅; flags 🔁 echo-chamber sources |
+| `calibration_log` | Post | Append probabilistic claims, resolve outcomes over time, compute Brier score (measures whether your ✅/🔵/🟠 tags actually match reality) |
+| `eval_harness` | Quality | Run the orchestrator against a reference benchmark; scores accuracy/citation/hallucination/calibration; tracks regressions across runs |
 | `brainstorm_from_research` | Output | Stress-tested project ideas with optional code-validated market fit |
 | `list_research_reports` | Browse | Index of everything in `research-output/` |
 
@@ -271,6 +279,147 @@ code-validated market-fit numbers for the top 3.
 ```
 
 Or just look in `research-output/` directly.
+
+---
+
+## Technical concept research (for engineers)
+
+The orchestrator was designed for market/competitive research, but it
+works equally well for "should I adopt X?" and "what's the SOTA in Y?"
+questions. The trick is encoding **your constraints** so the agent can
+weight findings against your reality, not just "what does the world
+think."
+
+### Step 1 — Set your profile once
+
+```
+> Set my personal_context_profile to:
+  Role: distributed-systems engineer at a 200-person SaaS
+  Stack: Go, Postgres 15, Kafka 3.x, K8s, Datadog
+  Scale: 30k req/s p50, P99 budget 200ms, 4 regions
+  Non-goals: no Rust rewrite, no managed-only solutions, no NVLink-required tech
+  Adoption appetite: moderate — willing to adopt 2-year-old tech with active community,
+    not bleeding edge
+  Pain points: cross-region transactions, schema evolution, cold-start on autoscale
+```
+
+This writes `research-output/_profile.md`. It's auto-injected into every
+subsequent research run, so findings get filtered against your reality.
+Gitignored — your profile stays local. Update with the same tool any time.
+
+### Step 2 — Use one of these proven patterns
+
+#### Pattern A — "Should I adopt X?"
+
+```
+> pre_register_research with:
+    topic: "Adopting Raft for our metadata service (replacing ZooKeeper)"
+    dimensions:
+      - correctness under network partition
+      - operational cost vs current ZooKeeper
+      - Go library maturity (etcd/io, hashicorp/raft)
+      - observed failure modes in production at our scale
+      - migration cost from current setup
+    exclusion_criteria:
+      - vendor blogs without postmortem links
+      - papers older than 2022 unless seminal
+    falsifiability: "If 3+ teams of comparable size report Raft caused outages
+                     they wouldn't have had with ZooKeeper, abandon."
+
+> Then run_deep_research at depth=standard with focus_areas=[academic_papers,
+  tech_landscape, developer_sentiment]
+
+> Then ensemble_critique on the report
+> Then bias_audit
+```
+
+The Practitioner critic in the ensemble will catch operational debt the
+Skeptic won't. The Regulator will surface compliance/disclosure issues
+you might not have considered.
+
+#### Pattern B — "What's the SOTA in X?"
+
+```
+> run_deep_research:
+    topic: "State of distributed transactions in 2026: 2PC alternatives that
+           actually shipped in production at >10k tx/s"
+    focus_areas: [academic_papers, tech_landscape, developer_sentiment]
+    depth: deep
+
+> Then concept_explainer for the top 2-3 contenders
+> Then validate_with_code (method=benchmark) for any "X is N× faster" claim
+```
+
+The depth=deep tier forces 30+ URLs and 18+ inline quotes per specialist —
+necessary for technical questions where the difference between papers
+and production is the whole point.
+
+#### Pattern C — Quick "is this real?" sanity check
+
+```
+> Run quick research on "is QUIC actually winning over HTTP/2 for
+  internal microservice traffic in 2026"
+```
+
+`depth=quick` does ~1 hour of research. Good for litmus tests before
+investing in a full investigation.
+
+### What technical-research-specific signal you'll get
+
+- **Production failure modes** (not just "the technique works"): the
+  bias audit + Practitioner critic surface war stories.
+- **Compatibility flags** against your stack: profile-aware findings
+  (e.g. "this requires NVLink — your rig is PCIe-3, marked inapplicable").
+- **Adoption-curve quantification**: `trend_quantifier` pulls GitHub /
+  npm / job-posting trends with R² fits, distinguishing real momentum
+  from temporary hype.
+- **Code-validated benchmarks**: claims like "Foo is 3× faster than
+  Bar" trigger `validate_with_code(method=benchmark)` — actual
+  measurement, not just citation of someone else's number.
+
+---
+
+## Quality discipline (Gartner-grade)
+
+The orchestrator can be run lightly or with full enterprise discipline.
+For decision-grade reports (the kind you'd hand to a VP or stake your
+quarter on), use this workflow:
+
+```
+1. personal_context_profile (set once, then forget)
+2. recall_prior_research        — don't re-do work you already did
+3. pre_register_research        — lock the rubric BEFORE looking at sources
+4. run_deep_research            — full hybrid pipeline
+5. completeness_audit           — surface gaps; spawn fill-ins as needed
+6. ensemble_critique            — 3 critics on different model families
+7. bias_audit                   — explicit checklist; failed checks block ship
+8. citation_verifier            — verbatim quotes for every ✅
+9. calibration_log (action=log) — record probabilistic claims for later scoring
+10. (months later)
+    calibration_log (action=resolve) — mark outcomes
+    calibration_log (action=score)   — Brier score across all resolved claims
+11. eval_harness                — quarterly run against reference benchmark
+                                  to catch quality regressions
+```
+
+**Why each step matters:**
+
+- **Pre-registration** kills motivated reasoning. If you let evidence
+  reshape your evaluation rubric mid-research, you're cherry-picking
+  retroactively.
+- **Ensemble critique** → 3 priors on different models means findings
+  that survive all three are genuinely robust. Single-model critique
+  has correlated blind spots.
+- **Verbatim quotes** kill paraphrase drift — the #1 hallucination
+  vector for research agents.
+- **Calibration log** is how you tell if your "✅ Verified" tags
+  actually correspond to ~95% accuracy in reality. If your Brier
+  score is 0.30, your confidence labels are theater.
+- **Eval harness** is the regression suite for the agent itself.
+  Without it, every "improvement" you make to prompts/orchestration
+  is unfalsifiable. Bundled sample at
+  `.github/extensions/research-orchestrator/eval-benchmark/sample.json`
+  — extend with your own reference questions over time.
 
 ---
 

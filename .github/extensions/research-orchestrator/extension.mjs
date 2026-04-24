@@ -2103,7 +2103,44 @@ Save to: \`${ideasPath}\``;
       },
     },
 
-    // ─── 11. pre_register_research ────────────────────────────────────
+    // ─── 11. personal_context_profile ─────────────────────────────────
+    // Persists "who you are / what you're building / what your constraints
+    // are" so every research run can weight findings against your reality
+    // (instead of generic "what does the world think"). Auto-injected into
+    // the agent context on session start when present.
+    {
+      name: "personal_context_profile",
+      description: "Save / show / clear a personal-context profile that auto-injects into every research run. Encodes your role, stack, constraints, non-goals, and adoption appetite so findings get weighted against your reality (e.g. 'requires NVLink' auto-flags for a PCIe rig, 'eventual consistency only' auto-flags for a strong-consistency shop). One-time setup; massively improves fit-to-you signal for technical research.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["set", "show", "clear"], description: "set = write/replace; show = print current; clear = delete" },
+          profile_markdown: { type: "string", description: "(set only) Free-form markdown. Suggested sections: Role, Stack, Scale/Constraints, Non-goals, Adoption appetite (conservative/moderate/aggressive), Known pain points." },
+        },
+        required: ["action"],
+      },
+      handler: async (args) => {
+        const profilePath = join(RESEARCH_DIR, "_profile.md");
+        if (args.action === "set") {
+          if (!args.profile_markdown) return JSON.stringify({ error: "set requires profile_markdown" });
+          const stamped = `<!-- profile saved: ${new Date().toISOString()} -->\n${args.profile_markdown.trim()}\n`;
+          writeFileSync(profilePath, stamped);
+          await session.log(`👤 Personal context profile saved (${args.profile_markdown.length} chars). Will auto-inject on next session start.`);
+          return JSON.stringify({ status: "saved", path: profilePath, note: "Restart session (or it'll pick up on next onSessionStart) for automatic injection. For this session, current research runs already include it via this tool's return value when referenced." });
+        }
+        if (args.action === "show") {
+          if (!existsSync(profilePath)) return JSON.stringify({ status: "no_profile", hint: "Call with action=set and profile_markdown to create one." });
+          return JSON.stringify({ status: "ok", path: profilePath, content: readFileSync(profilePath, "utf8") });
+        }
+        if (args.action === "clear") {
+          if (existsSync(profilePath)) { try { writeFileSync(profilePath, ""); } catch {} }
+          return JSON.stringify({ status: "cleared" });
+        }
+        return JSON.stringify({ error: `unknown action: ${args.action}` });
+      },
+    },
+
+    // ─── 12. pre_register_research ────────────────────────────────────
     // Locks methodology BEFORE specialists run. Inspired by clinical-trial
     // pre-registration. Kills motivated reasoning at the source.
     {
@@ -2586,6 +2623,14 @@ Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with 
       const count = rebuildMemoryIndex();
       await session.log(`🔬 Research Orchestrator v2 (enterprise multi-agent) loaded — ${count} prior report(s) indexed`);
       const memoryDigest = memoryDigestForContext();
+      let profileBlock = "";
+      const profilePath = join(RESEARCH_DIR, "_profile.md");
+      if (existsSync(profilePath)) {
+        try {
+          const p = readFileSync(profilePath, "utf8").trim();
+          if (p) profileBlock = `\n\n**👤 Personal context profile (auto-injected — every research run should weight findings against this):**\n\n${p}\n\n*To edit: \`personal_context_profile\` tool with \`action: "set"\`. To remove: \`action: "clear"\`.*`;
+        } catch { /* ignore */ }
+      }
       return {
         additionalContext: `Research orchestrator v2 active — enterprise multi-agent, falsification-first, with cross-session memory and adaptive supervision.
 
@@ -2594,6 +2639,7 @@ Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with 
 
 **Tools**
 - \`recall_prior_research\` — query memory of past reports (always run first on a new topic)
+- \`personal_context_profile\` — **NEW** save your role/stack/constraints once; every research run weights findings against it
 - \`pre_register_research\` — **NEW** lock dimensions/exclusions/glossary/falsifiability BEFORE specialists run (kills motivated reasoning)
 - \`plan_research\` — generate a structured research plan
 - \`run_deep_research\` — full hybrid pipeline with all enterprise phases
@@ -2627,7 +2673,7 @@ Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with 
 
 **Enterprise defaults**: \`autonomy=auto\`, \`enable_code_validation=true\`, critic model = ${CRITIC_MODEL} (different family from orchestrator).
 
-${memoryDigest || "_(No prior research on file. Memory will accumulate as you run new investigations.)_"}`,
+${memoryDigest || "_(No prior research on file. Memory will accumulate as you run new investigations.)_"}${profileBlock}`,
       };
     },
 
