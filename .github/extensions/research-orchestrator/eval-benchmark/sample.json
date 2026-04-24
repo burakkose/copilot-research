@@ -1,0 +1,38 @@
+{
+  "name": "research-orchestrator-sample-benchmark",
+  "version": "0.1",
+  "description": "Reference questions with known-correct answers. Used by eval_harness to score the agent on factual accuracy, citation correctness, hallucination, calibration, and coverage. Add your own questions over time — the more diverse, the more useful the regression signal.",
+  "scoring_notes": "Each question has ground_truth (the canonical answer + key supporting facts) and rubric (how to grade partial credit). The eval_harness grader reads the agent's report against these and produces 0.0–1.0 scores per metric.",
+  "questions": [
+    {
+      "id": "transformer-citations",
+      "question": "What is the citation count of the original 'Attention Is All You Need' paper (Vaswani et al. 2017) on Google Scholar, and what was the affiliation of the first author at time of publication?",
+      "ground_truth": "As of 2026, the paper has well over 100,000 Google Scholar citations (specific number changes; allow ±15%). First author Ashish Vaswani was at Google Brain at time of publication.",
+      "rubric": "Full credit if both numbers match within 15% AND affiliation correct. Half credit if affiliation right but citation count off by more than 15%. Zero if hallucinates a different paper or different first author."
+    },
+    {
+      "id": "kubernetes-1.0-date",
+      "question": "When was Kubernetes 1.0 released and which company donated it to the CNCF?",
+      "ground_truth": "Kubernetes 1.0 was released on July 21, 2015. Google donated it (with Linux Foundation) to form the Cloud Native Computing Foundation (CNCF).",
+      "rubric": "Full credit for correct date (within same month) AND donor organization. Half credit for one correct."
+    },
+    {
+      "id": "openai-funding-2023",
+      "question": "How much did OpenAI raise from Microsoft in their January 2023 announcement, and what was the structure of the deal?",
+      "ground_truth": "Microsoft announced a 'multi-year, multi-billion dollar investment' on January 23, 2023. Specific reported amount was $10B (Bloomberg, others). Structure was a mix of cash + Azure compute credits + revenue share until Microsoft recoups investment + capped-profit structure.",
+      "rubric": "Full credit if the $10B figure is reported with appropriate hedging (Microsoft never officially confirmed the exact number) AND the structural features (Azure credits, capped profit) are mentioned."
+    },
+    {
+      "id": "rust-vs-cpp-perf",
+      "question": "Is Rust generally faster than equivalent C++ code? What does the benchmark evidence show?",
+      "ground_truth": "Rust is roughly performance-equivalent to C++ in most benchmarks (within 5-10% in either direction). Some benchmarks favor C++ slightly (e.g., compute-heavy SIMD-tuned code), some favor Rust (e.g., cases where Rust's safety enables better optimization). The 'Rust is faster than C++' framing is mostly marketing; honest answer is 'comparable, with workload-specific variance.'",
+      "rubric": "Full credit for the nuanced 'roughly equivalent, workload-dependent' answer with at least 2 cited benchmarks. Half credit for a one-sided claim with sources. Zero for unsupported one-sided claim."
+    },
+    {
+      "id": "moe-active-params",
+      "question": "What are the active parameters per token for Mixtral 8x7B, and how does the MoE routing work?",
+      "ground_truth": "Mixtral 8x7B has ~46.7B total parameters but only ~12.9B are active per token (top-2 routing of 8 experts per layer). Each token's hidden state is sent to the top-2 experts as scored by a router; outputs are weighted-averaged.",
+      "rubric": "Full credit for correct active count (~13B), correct routing (top-2 of 8), and correct total (~47B). Half credit for active-param number off by 20% but routing correct."
+    }
+  ]
+}

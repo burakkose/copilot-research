@@ -1737,7 +1737,7 @@ Step 3: Write the critique output to \`${out}\` in this format:
     // ─── 7. citation_verifier ────────────────────────────────────────
     {
       name: "citation_verifier",
-      description: "Extracts every cited URL from a report, fetches each one, and checks whether the cited claim is actually supported by the source. Flags broken/paywalled/unsupported citations. Writes a verification log.",
+      description: "Extracts every cited URL from a report, fetches each one, and checks whether the cited claim is actually supported by the source by extracting a VERBATIM supporting quote. Flags broken/paywalled/unsupported/paraphrase-drift citations. Writes a verification log with quote evidence.",
       parameters: {
         type: "object",
         properties: {
@@ -1773,11 +1773,14 @@ ${cap ? `Max citations to verify: ${cap}` : ""}
    \`web_fetch\`:
    - Fetch the page (markdown mode)
    - Determine status:
-     - ✅ **Supported** — page clearly contains the cited claim or its data
-     - 🟡 **Partial** — page mentions the topic but specific claim isn't there
+     - ✅ **Supported** — page clearly contains the cited claim AND you extracted a VERBATIM quote (≤40 words) that supports it
+     - 🟡 **Partial** — page mentions the topic but no verbatim sentence supports the specific claim (paraphrase drift)
      - 🔴 **Unsupported** — page exists but doesn't say what was cited
      - 💀 **Broken** — 404, blocked, paywalled, or redirected
      - ⚠️ **Vendor-as-independent** — claim was tagged independent but source is vendor
+     - 🔁 **Echo-chamber** — source merely repeats an upstream originator (different blog, same press release / paper). Note the originator URL.
+
+   For ✅ items you MUST capture the verbatim supporting quote — paraphrase is not acceptable.
 
 3. Write verification log to \`${out}\`:
 
@@ -1787,7 +1790,12 @@ ${cap ? `Max citations to verify: ${cap}` : ""}
 
 ## Summary
 - Total citations: N
-- ✅ Supported: A | 🟡 Partial: B | 🔴 Unsupported: C | 💀 Broken: D | ⚠️ Vendor-misclassified: E
+- ✅ Supported: A | 🟡 Partial: B | 🔴 Unsupported: C | 💀 Broken: D | ⚠️ Vendor-misclassified: E | 🔁 Echo-chamber: F
+
+## ✅ Supported (with verbatim quotes)
+| URL | Claim in report | Verbatim quote from source (≤40 words) |
+| --- | --- | --- |
+| ... | ... | "..." |
 
 ## Issues to address
 (only the non-✅ ones)
@@ -2095,7 +2103,446 @@ Save to: \`${ideasPath}\``;
       },
     },
 
-    // ─── 10. list_research_reports ───────────────────────────────────
+    // ─── 11. pre_register_research ────────────────────────────────────
+    // Locks methodology BEFORE specialists run. Inspired by clinical-trial
+    // pre-registration. Kills motivated reasoning at the source.
+    {
+      name: "pre_register_research",
+      description: "Pre-register a research protocol BEFORE running specialists: lock evaluation dimensions, exclusion criteria, glossary, falsifiability test, and bias-checks-to-run. Once written, this file is immutable for the duration of the run — synthesis must conform to it. Analog of clinical-trial pre-registration; biggest single defense against motivated reasoning.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "Research topic" },
+          dimensions: { type: "array", items: { type: "string" }, description: "The dimensions you'll evaluate the topic on (lock these BEFORE looking at vendors/papers, so the rubric isn't reshaped by their narrative)" },
+          exclusion_criteria: { type: "array", items: { type: "string" }, description: "Sources/methodologies to EXCLUDE (e.g. 'vendor-sponsored benchmarks', 'sources older than 24 months', 'press releases without underlying data')" },
+          glossary: { type: "object", description: "term -> definition. Specialists must use these definitions verbatim. Prevents terminology drift." },
+          falsifiability: { type: "string", description: "What evidence would flip the headline conclusion? If you can't answer this, the question is unfalsifiable — sharpen it before proceeding." },
+          bias_checks: { type: "array", items: { type: "string" }, description: "Biases to actively guard against on this topic (e.g. survivorship, hype-cycle, vendor narrative, recency, geographic, English-only, echo-chamber)" },
+          output_path: { type: "string" },
+        },
+        required: ["topic", "dimensions", "falsifiability"],
+      },
+      handler: async (args) => {
+        const id = newReportId();
+        const slug = slugify(args.topic);
+        const out = args.output_path
+          ? (safeResolveReport(args.output_path) || join(RESEARCH_DIR, basename(args.output_path)))
+          : join(RESEARCH_DIR, `${id}-${slug}-prereg.md`);
+        const md = `# Pre-Registered Research Protocol
+*Locked: ${new Date().toISOString()} — IMMUTABLE for this run*
+
+## Topic
+${args.topic}
+
+## Evaluation Dimensions (locked before any source review)
+${(args.dimensions || []).map((d, i) => `${i + 1}. ${d}`).join("\n")}
+
+## Exclusion Criteria
+${(args.exclusion_criteria || ["(none specified — flag this as a weakness)"]).map((x) => `- ${x}`).join("\n")}
+
+## Glossary (specialists must use these definitions verbatim)
+${Object.entries(args.glossary || {}).map(([k, v]) => `- **${k}**: ${v}`).join("\n") || "_(no glossary — terminology drift risk)_"}
+
+## Falsifiability Test
+**What evidence would flip the headline conclusion?**
+
+${args.falsifiability}
+
+## Active Bias Checks
+${(args.bias_checks || []).map((b) => `- [ ] ${b}`).join("\n") || "- [ ] (none specified — fill before synthesis)"}
+
+## Compliance
+Synthesis MUST:
+- Score every finding against the locked dimensions (no new dimensions invented mid-research)
+- Discard any source that violates exclusion criteria
+- Use glossary terms verbatim
+- Address the falsifiability test in the conclusion section
+- Run the bias checks and document the result of each
+`;
+        writeFileSync(out, md);
+        await session.log(`📜 Pre-registered: ${basename(out)}`);
+        return JSON.stringify({ status: "pre_registered", protocol_path: out, next: "Pass this path to plan_research / run_deep_research as additional context. Do NOT modify it during the run." });
+      },
+    },
+
+    // ─── 12. ensemble_critique ────────────────────────────────────────
+    // 3 critics with different priors. Replaces single-model red-team.
+    // Each critic spawned in parallel on a different model family.
+    {
+      name: "ensemble_critique",
+      description: "Run a 3-critic ensemble on a draft report. Each critic has a different prior (skeptic, regulator, practitioner) and runs on a different model when possible. Aggregates findings; only claims that survive all three are publication-ready. Higher signal than single red-team.",
+      parameters: {
+        type: "object",
+        properties: {
+          target_path: { type: "string", description: "Path to the draft report (must be in research-output/)" },
+          output_path: { type: "string" },
+          critic_models: {
+            type: "object",
+            description: "Override critic models. Defaults: skeptic=gpt-5.4, regulator=claude-opus-4.7, practitioner=gpt-5.3-codex.",
+          },
+          domain: { type: "string", description: "Optional: 'finance' / 'medical' / 'security' / 'enterprise-saas' — sharpens the regulator/practitioner priors" },
+        },
+        required: ["target_path"],
+      },
+      handler: async (args) => {
+        const target = safeResolveReport(args.target_path);
+        if (!target) return `Target not found at ${args.target_path}.`;
+        const out = args.output_path
+          ? (safeResolveReport(args.output_path) || join(RESEARCH_DIR, basename(args.output_path)))
+          : target.replace(/\.md$/, "-ensemble-critique.md");
+        const models = {
+          skeptic: (args.critic_models && args.critic_models.skeptic) || "gpt-5.4",
+          regulator: (args.critic_models && args.critic_models.regulator) || "claude-opus-4.7",
+          practitioner: (args.critic_models && args.critic_models.practitioner) || "gpt-5.3-codex",
+        };
+        const domain = args.domain ? ` (domain: ${args.domain})` : "";
+        await session.log(`🎭 Ensemble critique: ${basename(target)} — 3 critics${domain}`);
+
+        const prompt = `# Ensemble Critique (3 critics, parallel)
+
+Target: \`${target}\`
+Output: \`${out}\`${domain}
+
+Spawn THREE \`rubber-duck\` agents in PARALLEL (one tool call, three task invocations) with these distinct briefs:
+
+## Critic 1 — The Skeptic (model: ${models.skeptic}, mode: sync)
+> You assume every claim is wrong until proven. Your job is to find the weakest evidence and the strongest counter-arguments the author missed.
+> Read: ${target}
+> For each non-trivial claim: (a) is it falsifiable? (b) is the evidence independent or echo-chamber? (c) what counter-evidence exists that the author didn't surface?
+> Output a list of claims ranked by epistemic fragility (most fragile first).
+
+## Critic 2 — The Regulator (model: ${models.regulator}, mode: sync)
+> You read this as a regulator${args.domain ? ` in ${args.domain}` : ""}. Your job is to surface compliance, safety, ethical, legal, privacy, and disclosure risks the author treated as out-of-scope.
+> Read: ${target}
+> Catalog every recommendation/conclusion that would face regulatory friction or hidden liability. Specifically: data-handling, IP, dual-use, anti-trust, consumer-protection, environmental, labor.
+> Output a risk register with severity (low/med/high) and which jurisdiction/framework applies.
+
+## Critic 3 — The Practitioner (model: ${models.practitioner}, mode: sync)
+> You're the engineer who has to actually implement what this report recommends. Your job is to find where the recommendations break against operational reality.
+> Read: ${target}
+> For each recommendation: (a) what's the actual integration cost? (b) what existing system does it conflict with? (c) what skill/headcount does it require that the typical reader won't have? (d) does the timeline assume an unrealistic team?
+> Output a feasibility table with build/buy/integrate cost and a "would I bet my quarter on this" verdict.
+
+After all three return, write \`${out}\`:
+
+\`\`\`markdown
+# Ensemble Critique — ${basename(target)}
+*3 critics: ${models.skeptic} (skeptic), ${models.regulator} (regulator), ${models.practitioner} (practitioner)*
+*Date: ${new Date().toISOString().slice(0, 10)}*
+
+## Verdict
+🟢 publishable / 🟡 revise-then-publish / 🔴 substantial revision
+
+## Findings that ALL THREE critics flagged
+(highest priority — survived three independent priors)
+1. ...
+
+## Findings that TWO critics flagged
+(medium priority)
+
+## Findings that ONE critic flagged (per critic)
+### Skeptic
+### Regulator
+### Practitioner
+
+## Findings the report does WELL (cross-critic consensus)
+(don't break these in revision)
+
+## Top 3 actions before publication
+1. ...
+\`\`\`
+
+CRITICAL: Spawn all three agents in PARALLEL (single response, three task tool calls). Wait for all three. Then write the aggregated file.`;
+
+        setTimeout(() => session.send({ prompt }), 100);
+        return JSON.stringify({ status: "ensemble_initiated", target_path: target, output_path: out, critics: models });
+      },
+    },
+
+    // ─── 13. bias_audit ───────────────────────────────────────────────
+    {
+      name: "bias_audit",
+      description: "Run an explicit bias audit checklist on a draft report. Each bias gets a documented pass/fail with evidence. Biases checked: survivorship, hype-cycle, recency, vendor-narrative, geographic, English-only, echo-chamber, confirmation, anchoring, single-narrator, selection. Failed checks block publication.",
+      parameters: {
+        type: "object",
+        properties: {
+          report_path: { type: "string" },
+          output_path: { type: "string" },
+          extra_biases: { type: "array", items: { type: "string" }, description: "Domain-specific biases to add (e.g. 'WEIRD-population' for behavioral, 'p-hacking' for empirical)" },
+        },
+        required: ["report_path"],
+      },
+      handler: async (args) => {
+        const target = safeResolveReport(args.report_path);
+        if (!target) return `Report not found at ${args.report_path}.`;
+        const out = args.output_path
+          ? (safeResolveReport(args.output_path) || join(RESEARCH_DIR, basename(args.output_path)))
+          : target.replace(/\.md$/, "-bias-audit.md");
+        const extra = (args.extra_biases || []).map((b) => `- ${b}`).join("\n");
+        await session.log(`🧪 Bias audit: ${basename(target)}`);
+        const prompt = `# Bias Audit
+
+Target: \`${target}\`
+Output: \`${out}\`
+
+Read the target report. For EACH bias below, produce a structured verdict.
+
+## Biases to check
+1. **Survivorship** — Are we only seeing winners? Did we search for failures, postmortems, abandoned projects?
+2. **Hype cycle** — Are stars/articles/buzz being treated as production traction?
+3. **Recency** — Is the evidence base skewed to last 90 days while ignoring stable older evidence?
+4. **Vendor narrative** — Did vendor framing reshape the rubric? Are vendor blogs being treated as evidence rather than claims?
+5. **Geographic / English-only** — Are non-English / non-US/EU sources missing?
+6. **Echo-chamber** — Multiple sources, but all citing the same originator (1 paper / 1 press release)?
+7. **Confirmation** — Did we stop searching after the first agreement?
+8. **Anchoring** — Did the first source disproportionately shape framing of all others?
+9. **Single-narrator** — Same person/org told us this story across many surfaces?
+10. **Selection** — Were the sources/cases chosen because they support the conclusion?
+${extra ? `## Extra biases (caller-supplied)\n${extra}` : ""}
+
+## Output format
+Write \`${out}\`:
+
+\`\`\`markdown
+# Bias Audit — ${basename(target)}
+*Date: ${new Date().toISOString().slice(0, 10)}*
+
+## Summary
+- ✅ Passed: N | ⚠️ Warning: M | 🔴 Failed: K
+- **Publication recommendation**: ✅ ship / ⚠️ ship-with-caveats / 🔴 revise-first
+
+## Per-bias verdict
+### Survivorship — ✅ / ⚠️ / 🔴
+- **Evidence in report**: <quote/section>
+- **Why this verdict**: ...
+- **Required fix (if not ✅)**: ...
+
+(repeat for every bias)
+
+## Top 3 fixes before publication
+1. ...
+\`\`\`
+
+A bias gets ✅ ONLY if you can point to specific evidence in the report that the author actively guarded against it (e.g. for survivorship, the report cites failed projects). Default to ⚠️ when in doubt; default to 🔴 when no guard is visible.`;
+
+        setTimeout(() => session.send({ prompt }), 100);
+        return JSON.stringify({ status: "bias_audit_initiated", report_path: target, output_path: out });
+      },
+    },
+
+    // ─── 14. calibration_log ──────────────────────────────────────────
+    // Append-only ledger of probabilistic claims for Brier scoring over time.
+    {
+      name: "calibration_log",
+      description: "Append a probabilistic claim to the calibration ledger, OR record an outcome on a previously-logged claim, OR compute Brier score over resolved claims. Critical for measuring whether your agent's '🔵 Likely' tags actually correspond to ~70% accuracy in reality.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["log", "resolve", "score"], description: "log = add new claim; resolve = mark a claim as true/false; score = compute Brier" },
+          claim_id: { type: "string", description: "Required for resolve. Returned by log." },
+          claim: { type: "string", description: "The claim text (for log)" },
+          probability: { type: "number", description: "0.0–1.0 (for log). Map ✅=0.95, 🔵=0.75, 🟠=0.45, ⚡=0.50." },
+          source_report: { type: "string", description: "Path to the report where the claim was made (for log)" },
+          resolves_by: { type: "string", description: "ISO date when the claim should be resolvable (for log)" },
+          outcome: { type: "boolean", description: "True/False (for resolve)" },
+          evidence: { type: "string", description: "Verbatim evidence + URL for the resolve verdict" },
+        },
+        required: ["action"],
+      },
+      handler: async (args) => {
+        const ledger = join(RESEARCH_DIR, "_calibration-ledger.jsonl");
+        const readLedger = () => existsSync(ledger)
+          ? readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+          : [];
+        const append = (obj) => {
+          const line = JSON.stringify(obj);
+          const prev = existsSync(ledger) ? readFileSync(ledger, "utf8") : "";
+          writeFileSync(ledger, prev + line + "\n");
+        };
+
+        if (args.action === "log") {
+          if (!args.claim || args.probability == null) return JSON.stringify({ error: "log requires claim + probability" });
+          const id = "clm_" + randomBytes(4).toString("hex");
+          append({ id, ts: new Date().toISOString(), claim: args.claim, p: args.probability, source: args.source_report || null, resolves_by: args.resolves_by || null, outcome: null, evidence: null });
+          return JSON.stringify({ status: "logged", claim_id: id, ledger });
+        }
+
+        if (args.action === "resolve") {
+          if (!args.claim_id || args.outcome == null) return JSON.stringify({ error: "resolve requires claim_id + outcome" });
+          const all = readLedger();
+          const idx = all.findIndex((c) => c.id === args.claim_id);
+          if (idx < 0) return JSON.stringify({ error: `claim ${args.claim_id} not found` });
+          all[idx].outcome = args.outcome;
+          all[idx].evidence = args.evidence || null;
+          all[idx].resolved_at = new Date().toISOString();
+          writeFileSync(ledger, all.map((c) => JSON.stringify(c)).join("\n") + "\n");
+          return JSON.stringify({ status: "resolved", claim: all[idx] });
+        }
+
+        if (args.action === "score") {
+          const all = readLedger();
+          const resolved = all.filter((c) => c.outcome != null);
+          if (resolved.length === 0) return JSON.stringify({ status: "no_resolved_claims", total_logged: all.length });
+          const brier = resolved.reduce((s, c) => s + Math.pow(c.p - (c.outcome ? 1 : 0), 2), 0) / resolved.length;
+          // bucketed calibration
+          const buckets = {};
+          for (const c of resolved) {
+            const b = Math.floor(c.p * 10) / 10;
+            buckets[b] = buckets[b] || { count: 0, true_count: 0, mean_p: 0 };
+            buckets[b].count++;
+            buckets[b].true_count += c.outcome ? 1 : 0;
+            buckets[b].mean_p += c.p;
+          }
+          const calibration = Object.entries(buckets).map(([p_bucket, b]) => ({
+            stated_p_range: `${p_bucket}–${(parseFloat(p_bucket) + 0.1).toFixed(1)}`,
+            n: b.count,
+            mean_stated_p: (b.mean_p / b.count).toFixed(2),
+            actual_true_rate: (b.true_count / b.count).toFixed(2),
+            calibration_gap: ((b.mean_p / b.count) - (b.true_count / b.count)).toFixed(2),
+          })).sort((a, b) => parseFloat(a.stated_p_range) - parseFloat(b.stated_p_range));
+          return JSON.stringify({
+            status: "scored",
+            total_logged: all.length,
+            resolved: resolved.length,
+            brier_score: brier.toFixed(4),
+            interpretation: brier < 0.1 ? "🟢 well-calibrated" : brier < 0.25 ? "🟡 acceptable" : "🔴 poorly calibrated — the agent's confidence tags don't match reality",
+            calibration_table: calibration,
+            note: "Brier 0.0 = perfect, 0.25 = uniform 50% guess on binary, 1.0 = always wrong with full confidence.",
+          }, null, 2);
+        }
+
+        return JSON.stringify({ error: `unknown action: ${args.action}` });
+      },
+    },
+
+    // ─── 15. eval_harness ─────────────────────────────────────────────
+    // Reference-question benchmark; the single biggest enterprise gap.
+    {
+      name: "eval_harness",
+      description: "Run the orchestrator against a reference-question benchmark and score it on factual accuracy, citation correctness, hallucination rate, calibration. Without this, every other 'improvement' to the agent is unmeasurable. Loads a YAML/JSON benchmark of (question, ground-truth-answer, scoring-rubric), runs each, grades via a critic on a different model, writes a regression report.",
+      parameters: {
+        type: "object",
+        properties: {
+          benchmark_path: { type: "string", description: "Path to the benchmark file (JSON or YAML). If omitted, uses the bundled sample at eval-benchmark/sample.json." },
+          subset: { type: "array", items: { type: "string" }, description: "Run only specific question IDs (default: all)" },
+          grader_model: { type: "string", description: "Different model family to grade with. Default: gpt-5.4" },
+          output_path: { type: "string" },
+          depth: { type: "string", enum: ["quick", "standard", "deep"], description: "Depth to run each benchmark question at (default: quick — keeps cost reasonable)" },
+        },
+        required: [],
+      },
+      handler: async (args) => {
+        const benchmarkPath = args.benchmark_path
+          ? (safeResolveReport(args.benchmark_path) || resolve(process.cwd(), args.benchmark_path))
+          : join(RESEARCH_DIR, "..", ".github", "extensions", "research-orchestrator", "eval-benchmark", "sample.json");
+        if (!existsSync(benchmarkPath)) {
+          return JSON.stringify({
+            error: "benchmark file not found",
+            looked_at: benchmarkPath,
+            hint: "Pass benchmark_path or seed eval-benchmark/sample.json. See the bundled sample for schema."
+          });
+        }
+        let benchmark;
+        try {
+          const raw = readFileSync(benchmarkPath, "utf8");
+          benchmark = JSON.parse(raw);
+        } catch (e) {
+          return JSON.stringify({ error: "could not parse benchmark JSON", detail: e.message });
+        }
+        const questions = benchmark.questions || [];
+        const subset = args.subset && args.subset.length ? questions.filter((q) => args.subset.includes(q.id)) : questions;
+        const grader = args.grader_model || "gpt-5.4";
+        const depth = args.depth || "quick";
+        const runId = newReportId();
+        const out = args.output_path
+          ? (safeResolveReport(args.output_path) || join(RESEARCH_DIR, basename(args.output_path)))
+          : join(RESEARCH_DIR, `${runId}-eval-harness-report.md`);
+
+        await session.log(`🎯 Eval harness: ${subset.length} question(s), depth=${depth}, grader=${grader}`);
+
+        const prompt = `# Eval Harness Run
+
+Benchmark: \`${benchmarkPath}\`
+Questions to run: ${subset.length}
+Depth per question: ${depth}
+Grader model: ${grader}
+Output: \`${out}\`
+
+## Phase A — Run the agent on each benchmark question (PARALLEL)
+
+For EACH question below, spawn a \`general-purpose\` task subagent (mode: background) that calls \`run_deep_research\` with that topic at depth=${depth}. Capture the resulting report path.
+
+Questions:
+${subset.map((q, i) => `${i + 1}. **${q.id}**: ${q.question}`).join("\n")}
+
+Wait for all to complete (use list_agents / read_agent).
+
+## Phase B — Grade each result against ground truth (PARALLEL)
+
+For EACH completed question, spawn a \`rubber-duck\` agent on \`model: ${grader}\` (different family) with this brief:
+
+> You are a strict grader. Compare the agent's report to the ground truth. Be precise — partial credit is fine but document why.
+>
+> **Question**: <q.question>
+> **Ground truth**:
+> ${"```"}
+> <q.ground_truth>
+> ${"```"}
+> **Scoring rubric**: <q.rubric>
+>
+> **Agent's report**: <path>
+>
+> Grade on (0.0 – 1.0, with one-sentence justification each):
+> 1. **Factual accuracy** — does the report's headline answer match ground truth?
+> 2. **Citation correctness** — do the cited URLs actually support the claims?
+> 3. **Hallucination rate** — fraction of factual claims unsupported by any source
+> 4. **Numeric accuracy** — for any numbers in the report, are they within ±10% of ground-truth numbers?
+> 5. **Calibration** — claims tagged ✅ are >90% true; 🔵 are 60-80%; 🟠 ≤50%
+> 6. **Coverage** — fraction of ground-truth bullet points the report addressed
+>
+> Return JSON: \`{ "id": "<id>", "scores": { ... }, "overall": float, "notes": "..." }\`
+
+## Phase C — Aggregate & write the report
+
+Write \`${out}\`:
+
+\`\`\`markdown
+# Eval Harness Report — run ${runId}
+*Date: ${new Date().toISOString().slice(0, 10)} | Benchmark: ${basename(benchmarkPath)} | N=${subset.length} | depth=${depth}*
+
+## Headline scores (mean ± std)
+| Metric | Score | Interpretation |
+| --- | --- | --- |
+| Factual accuracy | x.xx | ... |
+| Citation correctness | x.xx | ... |
+| Hallucination rate | x.xx | lower = better |
+| Numeric accuracy | x.xx | ... |
+| Calibration | x.xx | ... |
+| Coverage | x.xx | ... |
+| **Overall** | x.xx | 🟢 / 🟡 / 🔴 |
+
+## Per-question results
+| ID | Question | Overall | Notes |
+| --- | --- | --- | --- |
+
+## Regressions vs previous runs
+(scan _eval-runs/ for prior eval reports; flag any metric that dropped >0.05 vs the most recent prior run)
+
+## Top failures (lowest-scoring questions)
+1. **<id>**: <one-line diagnosis>
+
+## Recommended fixes (ranked)
+1. ...
+\`\`\`
+
+Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with \`{ run_id, date, benchmark, n, mean_overall, mean_per_metric }\` for trend tracking.`;
+
+        setTimeout(() => session.send({ prompt }), 100);
+        return JSON.stringify({ status: "eval_initiated", run_id: runId, benchmark: benchmarkPath, n: subset.length, output_path: out });
+      },
+    },
+
+    // ─── 16. list_research_reports ───────────────────────────────────
     {
       name: "list_research_reports",
       description: "List all reports, plans, notes, critiques, and brainstorm outputs in research-output/.",
@@ -2147,6 +2594,7 @@ Save to: \`${ideasPath}\``;
 
 **Tools**
 - \`recall_prior_research\` — query memory of past reports (always run first on a new topic)
+- \`pre_register_research\` — **NEW** lock dimensions/exclusions/glossary/falsifiability BEFORE specialists run (kills motivated reasoning)
 - \`plan_research\` — generate a structured research plan
 - \`run_deep_research\` — full hybrid pipeline with all enterprise phases
 - \`deep_paper_search\` — arXiv + Semantic Scholar with citation-graph traversal
@@ -2154,10 +2602,22 @@ Save to: \`${ideasPath}\``;
 - \`concept_explainer\` — layered technical breakdowns with runnable code
 - \`completeness_audit\` — gap detection on specialist notes; recommends fill-ins
 - \`red_team_critique\` — adversarial review on a *different model family* (default ${CRITIC_MODEL})
-- \`citation_verifier\` — fetch each cited URL, check claim support
+- \`ensemble_critique\` — **NEW** 3-critic ensemble (skeptic + regulator + practitioner) for higher-signal review than single critic
+- \`bias_audit\` — **NEW** explicit checklist (survivorship/hype/recency/vendor/echo/...) with documented pass-fail per bias
+- \`citation_verifier\` — fetch each cited URL, check claim support, **now requires verbatim quotes for ✅**
 - \`validate_with_code\` — Python validation (Monte Carlo, trend fit, CI, recompute, benchmark)
+- \`calibration_log\` — **NEW** append probabilistic claims, resolve outcomes, compute Brier score (measures whether your confidence tags match reality)
+- \`eval_harness\` — **NEW** run the orchestrator against a reference benchmark; scores accuracy/citation/hallucination/calibration. **The single most important tool for measuring quality over time.**
 - \`brainstorm_from_research\` — stress-tested project ideas (with optional code validation)
 - \`list_research_reports\` — index of everything in research-output/
+
+**Enterprise quality discipline (Gartner-grade):**
+1. Start with \`pre_register_research\` for non-trivial topics — locks the rubric before evidence can reshape it
+2. Use \`ensemble_critique\` instead of single \`red_team_critique\` for publication-track reports
+3. Always run \`bias_audit\` before declaring a report finished
+4. \`citation_verifier\` is non-negotiable — verbatim quotes only, no paraphrase drift
+5. Log probabilistic claims to \`calibration_log\`; review Brier score quarterly
+6. Run \`eval_harness\` after any change to prompts/orchestration to catch regressions
 
 **Methodology lives in:**
 \`.github/instructions/research.instructions.md\` (falsification, confidence tags, source tiers, multi-query)
