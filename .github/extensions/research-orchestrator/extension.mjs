@@ -871,6 +871,11 @@ After saving, output to chat:
           plan_path: paths.plan,
           notes_dir: paths.notesDir,
           report_path_when_done: paths.report,
+          next_steps: [
+            `→ recommended: Execute the plan with run_deep_research({ topic, continue_from_plan: "${paths.plan}", depth: "${depth}" }) — spawns the parallel specialists.`,
+            `Tighten first: open ${paths.plan} and edit the question list, then re-run plan_research if the decomposition feels off.`,
+            `Lock the rubric before specialists run: pre_register_research({ topic, dimensions, falsifiability, exclusion_criteria }) — kills motivated reasoning.`,
+          ],
         });
       },
     },
@@ -1180,6 +1185,12 @@ When the report is final, log "✅ Research complete: ${paths.report}".`;
           notes_dir: paths.notesDir,
           artifacts_dir: paths.artifacts,
           report_path: paths.report,
+          next_steps: [
+            `→ recommended (when report finishes): Open ${paths.report} first — that's the synthesized answer. Then dive into ${paths.notesDir}/ for any specialist area you want depth on.`,
+            `Stress-test before acting on findings: ensemble_critique({ target_path: "${paths.report}" }) — 3 critics on different model families. Run bias_audit on the same path right after.`,
+            `Verify every numeric claim: citation_verifier({ report_path: "${paths.report}" }) — required before sharing externally. Flags paraphrase drift.`,
+            `If this report inspired product/decision ideas: brainstorm_from_research({ report_path: "${paths.report}", validate_top_ideas: true }) — generates ranked ideas with pre-mortems.`,
+          ],
         });
       },
     },
@@ -1263,7 +1274,13 @@ A suggested 5-paper sequence for someone new to this area.
 Use confidence tags from \`research.instructions.md\` on consensus claims.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "paper_search_initiated", topic, output_path: out });
+        return JSON.stringify({ status: "paper_search_initiated", topic, output_path: out,
+          next_steps: [
+            `→ recommended (when paper graph is written): Open ${out} and read the "Landmark papers" + "Critical responses" sections — that's the high-signal subset.`,
+            `For any paper that looks load-bearing for your decision: deep_paper_search again on its specific claim with traverse_depth: 2 — finds the rebuttals.`,
+            `If the literature seems to converge too cleanly: spawn a red_team_critique on ${out} focused on "what's the missing counter-evidence school of thought?".`,
+          ],
+        });
       },
     },
 
@@ -1364,7 +1381,13 @@ List of files in \`${artifactsDir}/\`.
 \`\`\``;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "trend_quantifier_initiated", subject, artifacts_dir: artifactsDir, output_path: out });
+        return JSON.stringify({ status: "trend_quantifier_initiated", subject, artifacts_dir: artifactsDir, output_path: out,
+          next_steps: [
+            `→ recommended (when trends are written): Open ${out} and check the slope + R² for each metric. R² < 0.5 means the "trend" is noise — don't treat it as signal.`,
+            `Cross-check: if GitHub stars trend up but npm/PyPI downloads don't, the project is hype-cycle / not in production use. Trust the install metrics over the social metrics.`,
+            `If the trend is real and steep: validate_with_code({ method: "trend_fit", claim: "<X is growing N% YoY>" }) for an independent recompute.`,
+          ],
+        });
       },
     },
 
@@ -1629,7 +1652,14 @@ Honest list. Every technique has wrong contexts.
 Use confidence tags only on contested claims (e.g., "X is faster than Y").`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "explainer_initiated", concept, output_path: out, artifacts_dir: artifactsDir });
+        return JSON.stringify({ status: "explainer_initiated", concept, output_path: out, artifacts_dir: artifactsDir,
+          next_steps: [
+            `→ recommended (when explainer is written): Open ${out} and read the "Pitfalls" + "Comparison" sections first — that's where adoption decisions get made.`,
+            `Run the included code in ${artifactsDir} — if it doesn't actually run, the explanation is suspect.`,
+            `If you're considering adopting this concept: deep_paper_search on the same topic to surface known failure modes the explainer may have glossed over.`,
+            `For decision-grade adoption: trend_quantifier on the relevant libraries to check whether the ecosystem is alive.`,
+          ],
+        });
       },
     },
 
@@ -1730,7 +1760,13 @@ Step 3: Write the critique output to \`${out}\` in this format:
 \`\`\``;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "critique_initiated", target_path: target, output_path: out, critic_model: model });
+        return JSON.stringify({ status: "critique_initiated", target_path: target, output_path: out, critic_model: model,
+          next_steps: [
+            `→ recommended (when critique is written): Open ${out} and triage findings by severity. For each HIGH-severity finding, downgrade the affected claim in the original report (✅ → 🟠) or remove it.`,
+            `For higher signal: re-run as ensemble_critique({ target_path: "${target}" }) — 3 critics on different model families catch ~2x more issues than single critic.`,
+            `After triaging: re-run citation_verifier({ report_path: "${target}" }) on any claim the critic flagged as unsupported.`,
+          ],
+        });
       },
     },
 
@@ -1812,7 +1848,14 @@ ${cap ? `Max citations to verify: ${cap}` : ""}
    orchestrator's call.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "citation_verification_initiated", report_path: report, output_path: out });
+        return JSON.stringify({ status: "citation_verification_initiated", report_path: report, output_path: out,
+          next_steps: [
+            `→ recommended (when verification log is written): Open ${out} and filter to ❌ (unsupported) and 🟡 (paraphrase drift) entries — those are the urgent fixes in ${report}.`,
+            `For each ❌: either find a real source (web_search) and re-cite, or remove the claim from ${report}.`,
+            `For each 🟡: replace the paraphrase with the verbatim quote the verifier extracted.`,
+            `Watch for 🔁 echo-chamber tags: multiple cited sources tracing back to the same primary — treat as a single source for confidence purposes.`,
+          ],
+        });
       },
     },
 
@@ -1900,7 +1943,14 @@ What you did, in one paragraph. Include assumptions, date range, sample size.
    plus the writeup path.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "code_validation_initiated", claim: args.claim, method: args.method, artifacts_dir: artDir });
+        return JSON.stringify({ status: "code_validation_initiated", claim: args.claim, method: args.method, artifacts_dir: artDir,
+          next_steps: [
+            `→ recommended (when validation finishes): Open ${artDir}/writeup.md — that's the verdict (claim confirmed / refuted / inconclusive) plus the recomputed numbers.`,
+            `If the claim was REFUTED: edit the source report to either remove the claim or replace it with the validated number. Add a citation to ${artDir}.`,
+            `If INCONCLUSIVE: try a different validation method (recompute / trend_fit / monte_carlo / survey_ci / benchmark) on the same claim — they catch different failure modes.`,
+            `Save as artifact: link to ${artDir} from any report citing this claim — full reproducibility trail.`,
+          ],
+        });
       },
     },
 
@@ -1991,7 +2041,13 @@ After writing, output to chat: the verdict + count of fill-ins recommended.
 The orchestrator will then decide whether to spawn them.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "audit_initiated", notes_dir: notesDir, output_path: out });
+        return JSON.stringify({ status: "audit_initiated", notes_dir: notesDir, output_path: out,
+          next_steps: [
+            `→ recommended (when audit is written): Open ${out} and look at "Recommended gap-fill specialists". Spawn each one as a follow-up task agent before synthesis.`,
+            `If audit shows contradiction between specialists: open both notes side-by-side, then run red_team_critique on whichever has the weaker source tier.`,
+            `If audit passes (no critical gaps): proceed to synthesis / report writing.`,
+          ],
+        });
       },
     },
 
@@ -2099,6 +2155,12 @@ Save to: \`${ideasPath}\``;
           ideas_path: ideasPath,
           idea_count: count,
           validate_top_ideas: validate,
+          next_steps: [
+            `→ recommended (when ideas file is written): Open ${ideasPath} FIRST — this is your "what to build" output with pre-mortems and validation plans for each idea.`,
+            `Then cross-reference: open ${report} for the underlying problem-space evidence behind any idea that intrigued you.`,
+            `Stress-test the ideas before committing: ensemble_critique({ target_path: "${ideasPath}", domain: "<your domain>" }) — kills the weak ideas. Follow with bias_audit on the same file.`,
+            `Pick your top 1-2 ideas and log a forecast: calibration_log({ action: "log", claim: "<idea X reaches PMF in 18 months>", probability: 0.X, source_report: "${ideasPath}" }) — measures your judgment over time.`,
+          ],
         });
       },
     },
@@ -2126,7 +2188,14 @@ Save to: \`${ideasPath}\``;
           const stamped = `<!-- profile saved: ${new Date().toISOString()} -->\n${args.profile_markdown.trim()}\n`;
           writeFileSync(profilePath, stamped);
           await session.log(`👤 Personal context profile saved (${args.profile_markdown.length} chars). Will auto-inject on next session start.`);
-          return JSON.stringify({ status: "saved", path: profilePath, note: "Restart session (or it'll pick up on next onSessionStart) for automatic injection. For this session, current research runs already include it via this tool's return value when referenced." });
+          return JSON.stringify({ status: "saved", path: profilePath,
+            note: "Restart session (or it'll pick up on next onSessionStart) for automatic injection.",
+            next_steps: [
+              `→ recommended: Restart this session so the profile auto-injects into onSessionStart context. After restart, run any research and the agent will weight findings against your profile.`,
+              `Validate it took: personal_context_profile({ action: "show" }) after restart.`,
+              `Now run your first research: pre_register_research → run_deep_research with a topic that exercises the constraints you encoded.`,
+            ],
+          });
         }
         if (args.action === "show") {
           if (!existsSync(profilePath)) return JSON.stringify({ status: "no_profile", hint: "Call with action=set and profile_markdown to create one." });
@@ -2198,7 +2267,13 @@ Synthesis MUST:
 `;
         writeFileSync(out, md);
         await session.log(`📜 Pre-registered: ${basename(out)}`);
-        return JSON.stringify({ status: "pre_registered", protocol_path: out, next: "Pass this path to plan_research / run_deep_research as additional context. Do NOT modify it during the run." });
+        return JSON.stringify({ status: "pre_registered", protocol_path: out,
+          next_steps: [
+            `→ recommended: Run plan_research or run_deep_research now, passing the protocol path as context (e.g., 'Use the locked protocol at ${out} — do not deviate from its dimensions or exclusion criteria').`,
+            `Do NOT edit ${out} during the run — that defeats the purpose. If the protocol turns out to be wrong, document why in the final report under "Protocol limitations".`,
+            `After the research completes: read ${out} alongside the report to verify the synthesis stayed within the locked rubric.`,
+          ],
+        });
       },
     },
 
@@ -2292,7 +2367,14 @@ After all three return, write \`${out}\`:
 CRITICAL: Spawn all three agents in PARALLEL (single response, three task tool calls). Wait for all three. Then write the aggregated file.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "ensemble_initiated", target_path: target, output_path: out, critics: models });
+        return JSON.stringify({ status: "ensemble_initiated", target_path: target, output_path: out, critics: models,
+          next_steps: [
+            `→ recommended (when ensemble report is written): Open ${out} and find the "Aggregate findings" section. Claims flagged by ≥2 of 3 critics are the ones to act on first.`,
+            `For each consensus finding: edit ${target} to either (a) downgrade the confidence tag, (b) add a counter-evidence quote, or (c) remove the claim.`,
+            `Then run bias_audit({ report_path: "${target}" }) — covers a different failure mode (systematic bias) that critics often miss.`,
+            `Final gate before sharing: citation_verifier({ report_path: "${target}" }) with verbatim-quote enforcement.`,
+          ],
+        });
       },
     },
 
@@ -2363,7 +2445,14 @@ Write \`${out}\`:
 A bias gets ✅ ONLY if you can point to specific evidence in the report that the author actively guarded against it (e.g. for survivorship, the report cites failed projects). Default to ⚠️ when in doubt; default to 🔴 when no guard is visible.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "bias_audit_initiated", report_path: target, output_path: out });
+        return JSON.stringify({ status: "bias_audit_initiated", report_path: target, output_path: out,
+          next_steps: [
+            `→ recommended (when audit is written): Open ${out} and look at the per-bias verdict table. Each FAIL is a section of ${target} that needs a specific fix.`,
+            `Common fixes: survivorship FAIL → add a "graveyard" section listing failed comparables; vendor-narrative FAIL → add an independent / non-vendor source per claim; recency FAIL → add a 5+ year baseline.`,
+            `After remediation: re-run bias_audit on the patched report. Aim for all checks PASS before publishing.`,
+            `If you also ran ensemble_critique, cross-reference: a claim flagged by both is high-priority to remove.`,
+          ],
+        });
       },
     },
 
@@ -2401,7 +2490,12 @@ A bias gets ✅ ONLY if you can point to specific evidence in the report that th
           if (!args.claim || args.probability == null) return JSON.stringify({ error: "log requires claim + probability" });
           const id = "clm_" + randomBytes(4).toString("hex");
           append({ id, ts: new Date().toISOString(), claim: args.claim, p: args.probability, source: args.source_report || null, resolves_by: args.resolves_by || null, outcome: null, evidence: null });
-          return JSON.stringify({ status: "logged", claim_id: id, ledger });
+          return JSON.stringify({ status: "logged", claim_id: id, ledger,
+            next_steps: [
+              `→ recommended: Set a calendar reminder for the resolves_by date. When that date arrives, run calibration_log({ action: "resolve", claim_id: "${id}", outcome: true|false, evidence: "<verbatim quote + URL>" }).`,
+              `After ≥10 claims resolve: calibration_log({ action: "score" }) — computes Brier score. If your 🔵 Likely tags don't actually hit ~70% accuracy, recalibrate your confidence language.`,
+            ],
+          });
         }
 
         if (args.action === "resolve") {
@@ -2575,7 +2669,14 @@ Write \`${out}\`:
 Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with \`{ run_id, date, benchmark, n, mean_overall, mean_per_metric }\` for trend tracking.`;
 
         setTimeout(() => session.send({ prompt }), 100);
-        return JSON.stringify({ status: "eval_initiated", run_id: runId, benchmark: benchmarkPath, n: subset.length, output_path: out });
+        return JSON.stringify({ status: "eval_initiated", run_id: runId, benchmark: benchmarkPath, n: subset.length, output_path: out,
+          next_steps: [
+            `→ recommended (when scoring finishes): Open ${out} for the regression report. Compare overall accuracy / hallucination rate / citation correctness to the previous eval run.`,
+            `If accuracy dropped: bisect — which prompt or orchestration change since last eval caused the regression?`,
+            `Extend the benchmark over time: add 1-2 new reference questions per major project area. The benchmark gets more useful as it grows.`,
+            `Run eval_harness BEFORE merging any prompt or extension change — single most important regression gate.`,
+          ],
+        });
       },
     },
 
@@ -2672,6 +2773,30 @@ Also append a JSONL entry to \`${join(RESEARCH_DIR, "_eval-runs.jsonl")}\` with 
 \`.github/instructions/memory.instructions.md\` (cross-session memory, recall discipline)
 
 **Enterprise defaults**: \`autonomy=auto\`, \`enable_code_validation=true\`, critic model = ${CRITIC_MODEL} (different family from orchestrator).
+
+---
+
+**🧭 NEXT-STEPS DIRECTIVE (mandatory for every research-tool response)**
+
+After ANY tool from this orchestrator returns, your final user-facing message MUST end with a section formatted exactly like:
+
+\`\`\`
+## 🧭 Next steps
+
+1. **<verb> <thing>** — <one-sentence why>. Run: \`<exact tool name + key args>\`
+2. **<alternative path>** — <why you'd pick this branch>. Run: \`<tool + args>\`
+3. (optional) **Stop here if** — <condition under which the user is already done>
+\`\`\`
+
+Rules:
+- Suggest 2-3 concrete next moves, not generic advice. Each must name a specific tool or file.
+- Order by what most users should do FIRST. Mark the recommended one with **→ recommended**.
+- If a tool returned a \`next_steps\` array in its JSON, use those verbatim as the seed — but still add your own judgment about which one fits the user's profile and the phase they're in.
+- After a long pipeline (run_deep_research, brainstorm_from_research), tell the user **which file to open first**, not just that files exist.
+- After a critique/audit, tell them **what verdict triggers what action** (e.g., "if ≥2 critics flag a claim, downgrade it from ✅ to 🟠 in the report and re-run citation_verifier on that section").
+- Never end a response after a long-running tool with just "done" or "saved to X". Always tell them what to do with the output.
+
+This directive overrides the default "be brief" guidance for the closing block: the Next-steps section is required even when the rest of your reply is short.
 
 ${memoryDigest || "_(No prior research on file. Memory will accumulate as you run new investigations.)_"}${profileBlock}`,
       };
